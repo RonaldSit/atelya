@@ -4,7 +4,7 @@
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 [![Dependencies: zero](https://img.shields.io/badge/dependencies-zero-brightgreen.svg)](#)
-<!-- pypi-badge -->
+[![PyPI](https://img.shields.io/pypi/v/atelya-attest)](https://pypi.org/project/atelya-attest/)
 
 **Can you prove your AI agent's memory wasn't tampered with?**
 
@@ -30,7 +30,11 @@ git clone https://github.com/RonaldSit/atelya.git
 cd atelya
 ```
 
-<!-- pip-install: enabled after PyPI publish -->
+Or from PyPI:
+
+```bash
+pip install atelya-attest
+```
 
 No `pip install` step is required to run the tools — they are stdlib-only.
 
