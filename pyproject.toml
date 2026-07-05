@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "atelya-attest"
+version = "0.1.0"
+description = "Tamper-evident audit trail for AI-agent memory — hash-chained attestation + transparency-log checkpoints (RFC 6962 / C2SP pattern). Zero dependencies."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+authors = [{ name = "Atelya OS contributors" }]
+keywords = [
+  "ai", "agents", "memory", "audit", "tamper-evident",
+  "compliance", "transparency-log", "attestation", "eu-ai-act",
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Security",
+  "Topic :: System :: Logging",
+]
+
+[project.urls]
+Homepage = "https://github.com/RonaldSit/atelya"
+Source = "https://github.com/RonaldSit/atelya"
+Issues = "https://github.com/RonaldSit/atelya/issues"
+
+[project.scripts]
+atelya-attest = "amem_attest:main"
+atelya-anchor = "amem_anchor:main"
+atelya-govern = "amem_governance:main"
+
+[tool.setuptools]
+py-modules = ["amem_attest", "amem_anchor", "amem_governance"]
