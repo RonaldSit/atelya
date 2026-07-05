@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "atelya-attest"
-version = "0.1.0"
+version = "0.1.1"
 description = "Tamper-evident audit trail for AI-agent memory — hash-chained attestation + transparency-log checkpoints (RFC 6962 / C2SP pattern). Zero dependencies."
 readme = "README.md"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
 requires-python = ">=3.10"
 authors = [{ name = "Atelya OS contributors" }]
 keywords = [
@@ -17,7 +17,6 @@ keywords = [
 classifiers = [
   "Development Status :: 4 - Beta",
   "Intended Audience :: Developers",
-  "License :: OSI Approved :: Apache Software License",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",

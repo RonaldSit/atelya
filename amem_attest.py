@@ -34,6 +34,7 @@ CLI:
   python amem_attest.py --selftest
 """
 import argparse, hashlib, hmac, json, os, sys, time, uuid
+import signal
 
 GENESIS = "GENESIS"
 
@@ -117,6 +118,8 @@ def _load_key(args):
 
 
 def main(argv=None):
+    if hasattr(signal, "SIGPIPE"):  # standard CLI: exit quietly (141) when piped to head/less
+        signal.signal(signal.SIGPIPE, signal.SIG_DFL)
     ap = argparse.ArgumentParser(description="tamper-evident hash-chained attestation for amem op-log")
     ap.add_argument("cmd", nargs="?", choices=["attest", "verify", "root"])
     ap.add_argument("path", nargs="?")
@@ -124,22 +127,22 @@ def main(argv=None):
     ap.add_argument("--key")
     ap.add_argument("--keyfile")
     ap.add_argument("--selftest", action="store_true")
-    A = ap.parse_args(argv)
+    args = ap.parse_args(argv)
 
-    if A.selftest:
+    if args.selftest:
         return _selftest()
-    if not A.cmd or not A.path:
+    if not args.cmd or not args.path:
         sys.exit("usage: amem_attest.py {attest|verify|root} <file> [--out chain.jsonl] [--key K|--keyfile F]")
-    if not os.path.exists(A.path):
-        sys.exit(f"file not found: {A.path}")
-    key = _load_key(A)
+    if not os.path.exists(args.path):
+        sys.exit(f"file not found: {args.path}")
+    key = _load_key(args)
     mode = "HMAC-SHA256 (tamper-evident vs. credentialed attacker)" if key else \
            "SHA-256 (tamper-evident vs. uncredentialed modification)"
 
-    if A.cmd == "attest":
-        events = read_jsonl(A.path)
+    if args.cmd == "attest":
+        events = read_jsonl(args.path)
         chain = build_chain(events, key)
-        out = A.out or (A.path + ".attest.jsonl")
+        out = args.out or (args.path + ".attest.jsonl")
         with open(out, "w", encoding="utf-8") as f:
             for e in chain:
                 f.write(json.dumps(e, ensure_ascii=False) + "\n")
@@ -147,8 +150,8 @@ def main(argv=None):
         print(f"  mode: {mode}")
         print(f"  root (commitment): {root_of(chain)}")
         print("  anchor this root externally (WORM/notary) for full assurance; this layer is tamper-EVIDENT, not tamper-PROOF.")
-    elif A.cmd == "verify":
-        chain = read_jsonl(A.path)
+    elif args.cmd == "verify":
+        chain = read_jsonl(args.path)
         ok, bad, reason = verify_chain(chain, key)
         print(f"  mode: {mode}")
         if ok:
@@ -156,14 +159,12 @@ def main(argv=None):
         else:
             print(f"❌ TAMPER DETECTED at seq={bad}: {reason}")
             return 1
-    elif A.cmd == "root":
-        print(root_of(read_jsonl(A.path)))
+    elif args.cmd == "root":
+        print(root_of(read_jsonl(args.path)))
     return 0
 
 
 def _selftest():
-    import tempfile
-    d = tempfile.mkdtemp()
     # a small op-log like amem memory.py emits
     events = [
         {"op": "add", "id": "a", "text": "user works at Boeing", "key": "employer", "created_at": 1.0},

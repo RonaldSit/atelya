@@ -62,6 +62,7 @@ Exit codes: 0 = ok · 1 = check/input failure · 2 = anchor refused
 (invalid chain, or C2SP inconsistency with a previously anchored checkpoint).
 """
 import argparse, json, os, sys, time
+import signal
 
 # ---- reuse amem_attest's canonical/digest/read/verify (ONE hash construction) ----
 try:
@@ -290,6 +291,8 @@ def cmd_latest(ledger_path, label, akey):
 
 # ------------------------------------------------------------------ main ----
 def main(argv=None):
+    if hasattr(signal, "SIGPIPE"):  # standard CLI: exit quietly (141) when piped to head/less
+        signal.signal(signal.SIGPIPE, signal.SIG_DFL)
     ap = argparse.ArgumentParser(description="external checkpoint/witness ledger for amem attest chains")
     ap.add_argument("cmd", nargs="?", choices=["anchor", "check", "latest"])
     ap.add_argument("chain", nargs="?")
@@ -300,32 +303,32 @@ def main(argv=None):
     ap.add_argument("--at")
     ap.add_argument("--require-anchor", action="store_true")
     ap.add_argument("--selftest", action="store_true")
-    A = ap.parse_args(argv)
+    args = ap.parse_args(argv)
 
-    if A.selftest:
+    if args.selftest:
         return _selftest()
-    if not A.cmd:
+    if not args.cmd:
         print("usage: amem_anchor.py {anchor|check|latest} [<chain.jsonl>] --ledger <ledger.jsonl> [...]")
         return 1
-    if not A.ledger:
+    if not args.ledger:
         print("--ledger is REQUIRED (choose the separately-controlled location deliberately)")
         return 1
-    akey = _load_key(A.key, A.keyfile, "AMEM_ANCHOR_KEY")
-    ckey = _load_key(A.chain_key, A.chain_keyfile, "AMEM_ATTEST_KEY")
+    akey = _load_key(args.key, args.keyfile, "AMEM_ANCHOR_KEY")
+    ckey = _load_key(args.chain_key, args.chain_keyfile, "AMEM_ATTEST_KEY")
 
-    if A.cmd == "latest":
-        return cmd_latest(A.ledger, A.label, akey)
-    if not A.chain or not os.path.exists(A.chain):
-        print(f"chain file not found: {A.chain}")
+    if args.cmd == "latest":
+        return cmd_latest(args.ledger, args.label, akey)
+    if not args.chain or not os.path.exists(args.chain):
+        print(f"chain file not found: {args.chain}")
         return 1
-    label = A.label or os.path.basename(A.chain)
-    if A.cmd == "anchor":
-        at = A.at or _now_rfc3339()
+    label = args.label or os.path.basename(args.chain)
+    if args.cmd == "anchor":
+        at = args.at or _now_rfc3339()
         if not _valid_rfc3339(at):
             print(f"--at must be RFC3339 UTC like 2026-01-01T00:00:00Z (got: {at})")
             return 1
-        return cmd_anchor(A.chain, A.ledger, label, akey, ckey, at)
-    return cmd_check(A.chain, A.ledger, label, akey, ckey, A.require_anchor)
+        return cmd_anchor(args.chain, args.ledger, label, akey, ckey, at)
+    return cmd_check(args.chain, args.ledger, label, akey, ckey, args.require_anchor)
 
 
 # ------------------------------------------------------------------ selftest ----

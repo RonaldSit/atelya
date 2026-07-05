@@ -38,6 +38,7 @@ tamper-PROOF: any modification/deletion/reorder is detected and located; anchor 
 root externally (WORM/notary) for full assurance.
 """
 import argparse, csv, json, os, re, sys, time
+import signal
 
 OPS_WRITE = {"add", "update"}          # events that carry/define content
 
@@ -51,7 +52,7 @@ def read_log(path):
                 continue
             try:
                 ev = json.loads(line)
-            except Exception:
+            except ValueError:  # malformed / non-JSON line -> skip (JSONDecodeError is a ValueError)
                 continue
             if "op" not in ev and "text" in ev:        # legacy {"text":...} == add
                 ev = {"op": "add", "text": ev["text"], "id": ev.get("id"), "key": ev.get("key"),
@@ -114,7 +115,8 @@ def export(rows, out):
             w = csv.DictWriter(f, fieldnames=["seq", "time", "op", "id", "actor", "detail"])
             w.writeheader(); w.writerows(rows)
     else:
-        json.dump(rows, open(out, "w", encoding="utf-8"), indent=1, ensure_ascii=False)
+        with open(out, "w", encoding="utf-8") as fh:
+            json.dump(rows, fh, indent=1, ensure_ascii=False)
     return out, fmt
 
 
@@ -229,6 +231,8 @@ def _print_rows(rows, n=40):
 
 
 def main(argv=None):
+    if hasattr(signal, "SIGPIPE"):  # standard CLI: exit quietly (141) when piped to head/less
+        signal.signal(signal.SIGPIPE, signal.SIG_DFL)
     ap = argparse.ArgumentParser()
     ap.add_argument("cmd", nargs="?", choices=["audit", "lineage", "conflicts", "erase", "retention", "summary", "attest", "verify-chain"])
     ap.add_argument("oplog", nargs="?")
@@ -241,33 +245,33 @@ def main(argv=None):
     ap.add_argument("--key")
     ap.add_argument("--keyfile")
     ap.add_argument("--selftest", action="store_true")
-    A = ap.parse_args(argv)
+    args = ap.parse_args(argv)
 
-    if A.selftest:
+    if args.selftest:
         return _selftest()
-    if not A.cmd or not A.oplog:
+    if not args.cmd or not args.oplog:
         sys.exit("usage: amem_governance.py {audit|lineage|conflicts|erase|retention|summary} <oplog.jsonl> [...]")
-    if not os.path.exists(A.oplog):
-        sys.exit(f"op-log not found: {A.oplog}")
-    events = read_log(A.oplog)
+    if not os.path.exists(args.oplog):
+        sys.exit(f"op-log not found: {args.oplog}")
+    events = read_log(args.oplog)
 
-    if A.cmd in ("attest", "verify-chain"):
+    if args.cmd in ("attest", "verify-chain"):
         try:
             import amem_attest as _att
         except ImportError:
             sys.exit("attest requires amem_attest.py next to this file")
         _key = None
-        if A.key:
-            _key = A.key.encode("utf-8")
-        elif A.keyfile:
-            with open(A.keyfile, "rb") as f:
+        if args.key:
+            _key = args.key.encode("utf-8")
+        elif args.keyfile:
+            with open(args.keyfile, "rb") as f:
                 _key = f.read().strip()
         elif os.environ.get("AMEM_ATTEST_KEY"):
             _key = os.environ["AMEM_ATTEST_KEY"].encode("utf-8")
         _mode = "HMAC-SHA256" if _key else "SHA-256"
-        if A.cmd == "attest":
+        if args.cmd == "attest":
             chain = _att.build_chain(events, _key)
-            out = A.out or (A.oplog + ".attest.jsonl")
+            out = args.out or (args.oplog + ".attest.jsonl")
             with open(out, "w", encoding="utf-8") as f:
                 for e in chain:
                     f.write(json.dumps(e, ensure_ascii=False) + "\n")
@@ -283,30 +287,30 @@ def main(argv=None):
                 sys.exit(f"TAMPER DETECTED at seq={bad}: {reason}")
         return
 
-    if A.cmd == "audit":
+    if args.cmd == "audit":
         rows = audit_timeline(events)
-        if A.out:
-            out, fmt = export(rows, A.out); print(f"exported {len(rows)} events -> {out} ({fmt})")
+        if args.out:
+            out, fmt = export(rows, args.out); print(f"exported {len(rows)} events -> {out} ({fmt})")
         else:
             _print_rows(rows)
-    elif A.cmd == "summary":
+    elif args.cmd == "summary":
         print(json.dumps(summary(events), indent=1, ensure_ascii=False))
-    elif A.cmd == "lineage":
-        if not A.id: sys.exit("--id required")
-        for i, op, ev in lineage(events, A.id):
+    elif args.cmd == "lineage":
+        if not args.id: sys.exit("--id required")
+        for i, op, ev in lineage(events, args.id):
             print(f"  seq={i:<4} {op:<11} {json.dumps({k: v for k, v in ev.items() if k != 'op'}, ensure_ascii=False)[:100]}")
-    elif A.cmd == "conflicts":
+    elif args.cmd == "conflicts":
         c = conflicts(events)
         print(f"{len(c)} contradiction(s):")
         for x in c:
             print(f"  a={x['a']}({x['a_status']}) b={x['b']}({x['b_status']}) why={x['why']} -> winner={x['winner']}")
-    elif A.cmd == "erase":
-        if not A.match: sys.exit("--match <regex> required")
-        r = erase(A.oplog, A.match, hard=A.hard)
+    elif args.cmd == "erase":
+        if not args.match: sys.exit("--match <regex> required")
+        r = erase(args.oplog, args.match, hard=args.hard)
         print(json.dumps(r, ensure_ascii=False))
-        print(f"  {'HARD PURGE (content removed)' if A.hard else 'SOFT forget (auditable; text retained in log)'}")
-    elif A.cmd == "retention":
-        r = retention(A.oplog, A.max_age_days, A.max_active, hard=A.hard)
+        print(f"  {'HARD PURGE (content removed)' if args.hard else 'SOFT forget (auditable; text retained in log)'}")
+    elif args.cmd == "retention":
+        r = retention(args.oplog, args.max_age_days, args.max_active, hard=args.hard)
         print(json.dumps(r, ensure_ascii=False))
     return 0
 
