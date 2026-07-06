@@ -181,12 +181,25 @@ def _append_ledger(path, entry):
 
 
 def _load_key(val, keyfile, env):
-    if val:
-        return val.encode("utf-8")
+    if val is not None:
+        print(
+            "warning: inline key flags are visible in process listings and shell history; "
+            f"prefer a keyfile or the {env} env var",
+            file=sys.stderr,
+        )
+        k = val.encode("utf-8")
+        if not k:
+            sys.exit(f"inline key given but empty; refusing silent HMAC->SHA-256 downgrade ({env})")
+        return k
     if keyfile:
         with open(keyfile, "rb") as f:
-            return f.read().strip()
+            k = f.read().strip()
+        if not k:
+            sys.exit(f"keyfile is empty: {keyfile}; refusing silent HMAC->SHA-256 downgrade")
+        return k
     v = os.environ.get(env)
+    if v is not None and not v.strip():
+        sys.exit(f"{env} is set but empty; refusing silent HMAC->SHA-256 downgrade")
     return v.encode("utf-8") if v else None
 
 

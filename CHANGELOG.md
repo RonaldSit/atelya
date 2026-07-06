@@ -36,6 +36,11 @@ Staged as **0.1.1** (version bumped in `pyproject.toml`; not yet on PyPI).
 - Governance timeline test made timezone-hermetic (asserted timestamp
   structure instead of a local-year prefix; previously failed on UTC−4).
 
+### Security
+- Key loaders now refuse empty keys from `--key`, keyfiles, or env vars instead of
+  silently downgrading HMAC to plain SHA-256; inline key flags emit a stderr warning
+  (visible in `ps`/shell history — prefer keyfile or env). (CodeRabbit R1)
+
 ## [0.1.0] — 2026-07-02
 
 ### Added

@@ -20,7 +20,7 @@ attack a plain hash chain cannot see: an insider who tampers **and re-chains**.
 - 🧾 **Governance CLI** — audit timeline, per-memory lineage, GDPR-correct
   erasure (soft-forget vs hard-purge, and the purge itself is a chained event)
 - 🪶 **Zero dependencies** — Python 3.10+ standard library only, ~3 small files
-- ✅ **38 tests** — known-answer vectors, stdlib-only independent verifiers,
+- ✅ **60 tests** — known-answer vectors, stdlib-only independent verifiers,
   adversarial suite (rewrite-and-rechain, truncation, ledger tampering, …)
 
 ## Install
@@ -30,7 +30,7 @@ git clone https://github.com/RonaldSit/atelya.git
 cd atelya
 ```
 
-Or from PyPI:
+Or from PyPI (installs the latest published release, currently **0.1.0**; this repo is 0.1.1-staged — see CHANGELOG):
 
 ```bash
 pip install atelya-attest
@@ -136,7 +136,7 @@ evidence trail those audits ask for; the sources and control mapping
 ## Tests
 
 ```bash
-python3 -m pytest tests/ -q     # 38 passed
+python3 -m pytest tests/ -q     # 60 passed
 ```
 
 Known-answer vectors, standard-library-only independent verifiers (no circular

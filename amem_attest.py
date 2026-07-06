@@ -121,12 +121,25 @@ def root_of(chain):
 
 
 def _load_key(args):
-    if getattr(args, "key", None):
-        return args.key.encode("utf-8")
+    if getattr(args, "key", None) is not None:
+        print(
+            "warning: inline --key is visible in process listings and shell history; "
+            "prefer --keyfile or AMEM_ATTEST_KEY",
+            file=sys.stderr,
+        )
+        k = args.key.encode("utf-8")
+        if not k:
+            sys.exit("--key given but empty; refusing silent HMAC->SHA-256 downgrade")
+        return k
     if getattr(args, "keyfile", None):
         with open(args.keyfile, "rb") as f:
-            return f.read().strip()
+            k = f.read().strip()
+        if not k:
+            sys.exit(f"keyfile is empty: {args.keyfile}; refusing silent HMAC->SHA-256 downgrade")
+        return k
     env = os.environ.get("AMEM_ATTEST_KEY")
+    if env is not None and not env.strip():
+        sys.exit("AMEM_ATTEST_KEY is set but empty; refusing silent HMAC->SHA-256 downgrade")
     return env.encode("utf-8") if env else None
 
 
