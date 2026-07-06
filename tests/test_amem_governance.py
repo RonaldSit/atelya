@@ -98,7 +98,8 @@ def test_audit_timeline_rows_and_flag_detail():
     flag = rows[4]
     assert flag["op"] == "flag" and flag["id"] == "a"
     assert "contradiction a=a b=b" in flag["detail"]
-    assert rows[0]["time"].startswith("1970-")  # created_at=1000.0 renders as a timestamp
+    t = rows[0]["time"]                      # created_at=1000.0 renders as a timestamp;
+    assert len(t) == 19 and t[4] == "-" and t[10] == "T"   # tz-agnostic (local year may be 1969/1970)
 
 
 def test_export_json_roundtrip(tmp_path):
