@@ -127,10 +127,9 @@ def _load_key(args):
             "prefer --keyfile or AMEM_ATTEST_KEY",
             file=sys.stderr,
         )
-        k = args.key.encode("utf-8")
-        if not k:
-            sys.exit("--key given but empty; refusing silent HMAC->SHA-256 downgrade")
-        return k
+        if not args.key.strip():
+            sys.exit("--key given but empty/whitespace; refusing silent HMAC->SHA-256 downgrade")
+        return args.key.encode("utf-8")  # bytes taken literally (0.1.0-compatible)
     if getattr(args, "keyfile", None):
         with open(args.keyfile, "rb") as f:
             k = f.read().strip()

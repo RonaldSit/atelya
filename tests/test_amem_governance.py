@@ -287,3 +287,13 @@ def test_cli_erase_rejects_invalid_regex(logfile):
     with pytest.raises(SystemExit) as e:
         gov.main(["erase", logfile, "--match", "["])
     assert "invalid --match regex" in str(e.value)
+
+
+def test_key_loaders_reject_whitespace_only_inline():
+    import types
+
+    with pytest.raises(SystemExit):
+        attest._load_key(types.SimpleNamespace(key="   ", keyfile=None))
+    anchor = _load("amem_anchor")
+    with pytest.raises(SystemExit):
+        anchor._load_key("   ", None, "AMEM_ANCHOR_KEY")

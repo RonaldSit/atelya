@@ -187,10 +187,11 @@ def _load_key(val, keyfile, env):
             f"prefer a keyfile or the {env} env var",
             file=sys.stderr,
         )
-        k = val.encode("utf-8")
-        if not k:
-            sys.exit(f"inline key given but empty; refusing silent HMAC->SHA-256 downgrade ({env})")
-        return k
+        if not val.strip():
+            sys.exit(
+                f"inline key given but empty/whitespace; refusing silent HMAC->SHA-256 downgrade ({env})"
+            )
+        return val.encode("utf-8")  # bytes taken literally (0.1.0-compatible)
     if keyfile:
         with open(keyfile, "rb") as f:
             k = f.read().strip()
