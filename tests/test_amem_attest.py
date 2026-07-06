@@ -15,13 +15,22 @@ test practice:
 
 Run:  pytest test_amem_attest.py -v
 """
-import copy, hashlib, hmac as hmac_mod, importlib.util, json, os, sys
+
+import copy
+import hashlib
+import hmac as hmac_mod
+import importlib.util
+import json
+import os
+import sys
 
 import pytest
 
 # ---- load the exact shipped module by path (works regardless of cwd) --------
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_spec = importlib.util.spec_from_file_location("amem_attest", os.path.join(os.path.dirname(_HERE), "amem_attest.py"))
+_spec = importlib.util.spec_from_file_location(
+    "amem_attest", os.path.join(os.path.dirname(_HERE), "amem_attest.py")
+)
 attest = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(attest)
 
@@ -44,14 +53,16 @@ KAT_HMAC = [
 # ---- 1. KNOWN-ANSWER TESTS ---------------------------------------------------
 def test_kat_sha256_chain_hashes_are_pinned():
     chain = attest.build_chain(FIXED_EVENTS, None)
-    assert [e["curr_hash"] for e in chain] == KAT_SHA256, \
+    assert [e["curr_hash"] for e in chain] == KAT_SHA256, (
         "SHA-256 chain drifted from pinned known-answer vectors (canonical serialization changed?)"
+    )
 
 
 def test_kat_hmac_chain_hashes_are_pinned():
     chain = attest.build_chain(FIXED_EVENTS, KAT_HMAC_KEY)
-    assert [e["curr_hash"] for e in chain] == KAT_HMAC, \
+    assert [e["curr_hash"] for e in chain] == KAT_HMAC, (
         "HMAC-SHA256 chain drifted from pinned known-answer vectors"
+    )
 
 
 def test_kat_genesis_and_linkage():
@@ -72,10 +83,14 @@ def _independent_verify(chain, key=None):
     prev = "GENESIS"
     for i, e in enumerate(chain):
         fields = {k: e[k] for k in ("seq", "event_id", "ts", "payload", "prev_hash")}
-        msg = json.dumps(fields, sort_keys=True, separators=(",", ":"),
-                         ensure_ascii=False).encode("utf-8") + prev.encode("utf-8")
-        h = (hmac_mod.new(key, msg, hashlib.sha256).hexdigest() if key
-             else hashlib.sha256(msg).hexdigest())
+        msg = json.dumps(fields, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(
+            "utf-8"
+        ) + prev.encode("utf-8")
+        h = (
+            hmac_mod.new(key, msg, hashlib.sha256).hexdigest()
+            if key
+            else hashlib.sha256(msg).hexdigest()
+        )
         if e["seq"] != i or e["prev_hash"] != prev or e["curr_hash"] != h:
             return False
         prev = e["curr_hash"]
@@ -84,8 +99,9 @@ def _independent_verify(chain, key=None):
 
 def test_independent_verifier_confirms_sha256_chain():
     chain = attest.build_chain(FIXED_EVENTS, None)
-    assert _independent_verify(chain, None), \
+    assert _independent_verify(chain, None), (
         "stdlib-only re-derivation disagrees with the module (spec/impl mismatch)"
+    )
 
 
 def test_independent_verifier_confirms_hmac_chain():
@@ -103,9 +119,13 @@ def test_independent_verifier_catches_tamper():
 # ---- 3. ADVERSARIAL CASES ----------------------------------------------------
 @pytest.fixture()
 def chain():
-    return attest.build_chain(FIXED_EVENTS + [
-        {"op": "forget", "id": "kat1", "created_at": 3000.0},
-    ], None)
+    return attest.build_chain(
+        FIXED_EVENTS
+        + [
+            {"op": "forget", "id": "kat1", "created_at": 3000.0},
+        ],
+        None,
+    )
 
 
 def test_fresh_chain_verifies(chain):
@@ -124,7 +144,7 @@ def test_delete_entry_detected(chain):
     t = copy.deepcopy(chain)
     del t[1]
     for i, e in enumerate(t):
-        e["seq"] = i                      # naive attacker renumbers
+        e["seq"] = i  # naive attacker renumbers
     ok, _, _ = attest.verify_chain(t, None)
     assert not ok
 
@@ -145,16 +165,23 @@ def test_seq_gap_detected(chain):
 
 def test_prev_hash_splice_detected(chain):
     t = copy.deepcopy(chain)
-    t[2]["prev_hash"] = "0" * 64          # splice a foreign link
+    t[2]["prev_hash"] = "0" * 64  # splice a foreign link
     ok, bad, _ = attest.verify_chain(t, None)
     assert not ok and bad == 2
 
 
 def test_append_forgery_without_recompute_detected(chain):
     t = copy.deepcopy(chain)
-    t.append({"seq": len(t), "event_id": "forged", "ts": None,
-              "payload": {"op": "add", "text": "forged"}, "prev_hash": t[-1]["curr_hash"],
-              "curr_hash": "f" * 64})
+    t.append(
+        {
+            "seq": len(t),
+            "event_id": "forged",
+            "ts": None,
+            "payload": {"op": "add", "text": "forged"},
+            "prev_hash": t[-1]["curr_hash"],
+            "curr_hash": "f" * 64,
+        }
+    )
     ok, bad, _ = attest.verify_chain(t, None)
     assert not ok and bad == len(t) - 1
 
@@ -169,8 +196,9 @@ def test_hmac_attacker_cannot_recompute_without_key():
     chain_real = attest.build_chain(FIXED_EVENTS, b"real-key")
     forged = copy.deepcopy(chain_real)
     forged[0]["payload"]["text"] = "tampered"
-    forged[0]["curr_hash"] = attest.digest("GENESIS", attest._payload_for_hash(forged[0]),
-                                           b"attacker-guess")
+    forged[0]["curr_hash"] = attest.digest(
+        "GENESIS", attest._payload_for_hash(forged[0]), b"attacker-guess"
+    )
     ok, _, _ = attest.verify_chain(forged, b"real-key")
     assert not ok
 
@@ -183,7 +211,7 @@ def test_canonical_key_order_stable():
 def test_canonical_unicode_stable():
     zh = {"text": "使用者偏好深色模式"}
     assert attest.canonical(zh) == attest.canonical(json.loads(json.dumps(zh)))
-    assert "使用者" in attest.canonical(zh).decode("utf-8")   # ensure_ascii=False preserved
+    assert "使用者" in attest.canonical(zh).decode("utf-8")  # ensure_ascii=False preserved
 
 
 def test_canonical_float_form_pinned():

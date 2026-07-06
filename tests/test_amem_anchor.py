@@ -16,7 +16,14 @@ Same methodology as tests/test_amem_attest.py:
 
 Run:  pytest tests/test_amem_anchor.py -v
 """
-import copy, hashlib, hmac as hmac_mod, importlib.util, json, os, sys
+
+import copy
+import hashlib
+import hmac as hmac_mod
+import importlib.util
+import json
+import os
+import sys
 
 import pytest
 
@@ -76,24 +83,40 @@ def _kat_head():
 def test_kat_checkpoint_sha256_pinned():
     seq, n, root = _kat_head()
     assert root == CHAIN_ROOT, "attest KAT root drifted — fix attest first"
-    e = anchor.make_entry("GENESIS", anchored_at=KAT_AT_1, label=KAT_LABEL,
-                          seq=seq, n_entries=n, root=root, key=None)
-    assert e["curr_hash"] == KAT_CP_SHA256, \
+    e = anchor.make_entry(
+        "GENESIS", anchored_at=KAT_AT_1, label=KAT_LABEL, seq=seq, n_entries=n, root=root, key=None
+    )
+    assert e["curr_hash"] == KAT_CP_SHA256, (
         "SHA-256 checkpoint hash drifted from pinned known-answer vector"
+    )
 
 
 def test_kat_checkpoint_hmac_pinned():
     seq, n, root = _kat_head()
-    e = anchor.make_entry("GENESIS", anchored_at=KAT_AT_1, label=KAT_LABEL,
-                          seq=seq, n_entries=n, root=root, key=KAT_HMAC_KEY)
+    e = anchor.make_entry(
+        "GENESIS",
+        anchored_at=KAT_AT_1,
+        label=KAT_LABEL,
+        seq=seq,
+        n_entries=n,
+        root=root,
+        key=KAT_HMAC_KEY,
+    )
     assert e["curr_hash"] == KAT_CP_HMAC
 
 
 def test_kat_second_checkpoint_chains_to_first():
     s2, n2, r2 = anchor.chain_head(attest.build_chain(GROWN_EVENTS, None))
     assert r2 == CHAIN2_ROOT
-    e2 = anchor.make_entry(KAT_CP_SHA256, anchored_at=KAT_AT_2, label=KAT_LABEL,
-                           seq=s2, n_entries=n2, root=r2, key=None)
+    e2 = anchor.make_entry(
+        KAT_CP_SHA256,
+        anchored_at=KAT_AT_2,
+        label=KAT_LABEL,
+        seq=s2,
+        n_entries=n2,
+        root=r2,
+        key=None,
+    )
     assert e2["prev_hash"] == KAT_CP_SHA256 and e2["curr_hash"] == KAT_CP2_SHA256
 
 
@@ -107,10 +130,14 @@ def _independent_verify_ledger(entries, key=None):
     prev = "GENESIS"
     for e in entries:
         fields = {k: e.get(k) for k in CP_FIELDS}
-        msg = json.dumps(fields, sort_keys=True, separators=(",", ":"),
-                         ensure_ascii=False).encode("utf-8") + prev.encode("utf-8")
-        h = (hmac_mod.new(key, msg, hashlib.sha256).hexdigest() if key
-             else hashlib.sha256(msg).hexdigest())
+        msg = json.dumps(fields, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(
+            "utf-8"
+        ) + prev.encode("utf-8")
+        h = (
+            hmac_mod.new(key, msg, hashlib.sha256).hexdigest()
+            if key
+            else hashlib.sha256(msg).hexdigest()
+        )
         if e.get("prev_hash") != prev or e.get("curr_hash") != h:
             return False
         prev = e["curr_hash"]
@@ -119,17 +146,26 @@ def _independent_verify_ledger(entries, key=None):
 
 def _two_cp_ledger(key=None):
     seq, n, root = _kat_head()
-    e1 = anchor.make_entry("GENESIS", anchored_at=KAT_AT_1, label=KAT_LABEL,
-                           seq=seq, n_entries=n, root=root, key=key)
+    e1 = anchor.make_entry(
+        "GENESIS", anchored_at=KAT_AT_1, label=KAT_LABEL, seq=seq, n_entries=n, root=root, key=key
+    )
     s2, n2, r2 = anchor.chain_head(attest.build_chain(GROWN_EVENTS, None))
-    e2 = anchor.make_entry(e1["curr_hash"], anchored_at=KAT_AT_2, label=KAT_LABEL,
-                           seq=s2, n_entries=n2, root=r2, key=key)
+    e2 = anchor.make_entry(
+        e1["curr_hash"],
+        anchored_at=KAT_AT_2,
+        label=KAT_LABEL,
+        seq=s2,
+        n_entries=n2,
+        root=r2,
+        key=key,
+    )
     return [e1, e2]
 
 
 def test_independent_ledger_verifier_confirms_sha256():
-    assert _independent_verify_ledger(_two_cp_ledger(None), None), \
+    assert _independent_verify_ledger(_two_cp_ledger(None), None), (
         "stdlib-only re-derivation disagrees with the module (spec/impl mismatch)"
+    )
 
 
 def test_independent_ledger_verifier_confirms_hmac():
@@ -162,18 +198,19 @@ def test_rewrite_and_rechain_detected(paths):
     assert anchor.main(["anchor", chain_p, "--ledger", ledger_p, "--at", KAT_AT_1]) == 0
     evil = copy.deepcopy(FIXED_EVENTS)
     evil[0]["text"] = "tampered history"
-    write_chain(evil, chain_p)                       # attacker RE-CHAINS after tampering
+    write_chain(evil, chain_p)  # attacker RE-CHAINS after tampering
     ok, _, _ = attest.verify_chain(attest.read_jsonl(chain_p), None)
     assert ok, "precondition: re-chained file must verify internally"
-    assert anchor.main(["check", chain_p, "--ledger", ledger_p]) == 1, \
+    assert anchor.main(["check", chain_p, "--ledger", ledger_p]) == 1, (
         "anchor check must detect the rewrite the chain alone cannot"
+    )
 
 
 def test_truncation_below_anchor_detected(paths):
     chain_p, ledger_p = paths
     write_chain(GROWN_EVENTS, chain_p)
     assert anchor.main(["anchor", chain_p, "--ledger", ledger_p, "--at", KAT_AT_1]) == 0
-    write_chain(FIXED_EVENTS[:1], chain_p)           # history "vanished"
+    write_chain(FIXED_EVENTS[:1], chain_p)  # history "vanished"
     assert anchor.main(["check", chain_p, "--ledger", ledger_p]) == 1
 
 
@@ -181,7 +218,7 @@ def test_append_only_growth_passes_and_reports_tail(paths):
     chain_p, ledger_p = paths
     write_chain(FIXED_EVENTS, chain_p)
     assert anchor.main(["anchor", chain_p, "--ledger", ledger_p, "--at", KAT_AT_1]) == 0
-    write_chain(GROWN_EVENTS, chain_p)               # legitimate append-only growth
+    write_chain(GROWN_EVENTS, chain_p)  # legitimate append-only growth
     assert anchor.main(["check", chain_p, "--ledger", ledger_p]) == 0
     assert anchor.main(["anchor", chain_p, "--ledger", ledger_p, "--at", KAT_AT_2]) == 0
     assert len(attest.read_jsonl(ledger_p)) == 2
@@ -196,8 +233,9 @@ def test_anchor_refuses_inconsistent_checkpoint_and_leaves_ledger_unchanged(path
     evil = copy.deepcopy(FIXED_EVENTS)
     evil[1]["text"] = "conflicting history"
     write_chain(evil, chain_p)
-    assert anchor.main(["anchor", chain_p, "--ledger", ledger_p, "--at", KAT_AT_2]) == 2, \
+    assert anchor.main(["anchor", chain_p, "--ledger", ledger_p, "--at", KAT_AT_2]) == 2, (
         "C2SP rule: MUST NOT sign a checkpoint inconsistent with a prior one"
+    )
     assert open(ledger_p, encoding="utf-8").read() == before, "refusal must not append"
 
 
@@ -214,7 +252,7 @@ def test_ledger_tamper_detected(paths):
     write_chain(FIXED_EVENTS, chain_p)
     assert anchor.main(["anchor", chain_p, "--ledger", ledger_p, "--at", KAT_AT_1]) == 0
     led = attest.read_jsonl(ledger_p)
-    led[0]["root"] = "0" * 64                        # tamper the receipt itself
+    led[0]["root"] = "0" * 64  # tamper the receipt itself
     write_ledger(led, ledger_p)
     assert anchor.main(["check", chain_p, "--ledger", ledger_p]) == 1
 
@@ -222,8 +260,12 @@ def test_ledger_tamper_detected(paths):
 def test_hmac_ledger_wrong_key_rejected(paths):
     chain_p, ledger_p = paths
     write_chain(FIXED_EVENTS, chain_p)
-    assert anchor.main(["anchor", chain_p, "--ledger", ledger_p,
-                        "--at", KAT_AT_1, "--key", "real-anchor-key"]) == 0
+    assert (
+        anchor.main(
+            ["anchor", chain_p, "--ledger", ledger_p, "--at", KAT_AT_1, "--key", "real-anchor-key"]
+        )
+        == 0
+    )
     assert anchor.main(["check", chain_p, "--ledger", ledger_p, "--key", "wrong-key"]) == 1
     assert anchor.main(["check", chain_p, "--ledger", ledger_p, "--key", "real-anchor-key"]) == 0
 
@@ -233,10 +275,24 @@ def test_same_seq_different_root_conflict(paths):
     chain_p, ledger_p = paths
     ch = write_chain(FIXED_EVENTS, chain_p)
     seq, n, root = anchor.chain_head(ch)
-    e1 = anchor.make_entry("GENESIS", anchored_at=KAT_AT_1, label="chain.jsonl",
-                           seq=seq, n_entries=n, root=root, key=None)
-    e2 = anchor.make_entry(e1["curr_hash"], anchored_at=KAT_AT_2, label="chain.jsonl",
-                           seq=seq, n_entries=n, root="f" * 64, key=None)
+    e1 = anchor.make_entry(
+        "GENESIS",
+        anchored_at=KAT_AT_1,
+        label="chain.jsonl",
+        seq=seq,
+        n_entries=n,
+        root=root,
+        key=None,
+    )
+    e2 = anchor.make_entry(
+        e1["curr_hash"],
+        anchored_at=KAT_AT_2,
+        label="chain.jsonl",
+        seq=seq,
+        n_entries=n,
+        root="f" * 64,
+        key=None,
+    )
     write_ledger([e1, e2], ledger_p)
     assert anchor.main(["check", chain_p, "--ledger", ledger_p]) == 1
 
@@ -245,10 +301,24 @@ def test_seq_decrease_witness_order_violation(paths):
     chain_p, ledger_p = paths
     ch = write_chain(GROWN_EVENTS, chain_p)
     s2, n2, r2 = anchor.chain_head(ch)
-    e1 = anchor.make_entry("GENESIS", anchored_at=KAT_AT_1, label="chain.jsonl",
-                           seq=s2, n_entries=n2, root=r2, key=None)
-    e2 = anchor.make_entry(e1["curr_hash"], anchored_at=KAT_AT_2, label="chain.jsonl",
-                           seq=0, n_entries=1, root=ch[0]["curr_hash"], key=None)
+    e1 = anchor.make_entry(
+        "GENESIS",
+        anchored_at=KAT_AT_1,
+        label="chain.jsonl",
+        seq=s2,
+        n_entries=n2,
+        root=r2,
+        key=None,
+    )
+    e2 = anchor.make_entry(
+        e1["curr_hash"],
+        anchored_at=KAT_AT_2,
+        label="chain.jsonl",
+        seq=0,
+        n_entries=1,
+        root=ch[0]["curr_hash"],
+        key=None,
+    )
     write_ledger([e1, e2], ledger_p)
     assert anchor.main(["check", chain_p, "--ledger", ledger_p]) == 1
 
@@ -256,12 +326,18 @@ def test_seq_decrease_witness_order_violation(paths):
 def test_require_anchor_flag(paths):
     chain_p, ledger_p = paths
     write_chain(FIXED_EVENTS, chain_p)
-    other = anchor.make_entry("GENESIS", anchored_at=KAT_AT_1, label="some-other-chain",
-                              seq=1, n_entries=2, root="a" * 64, key=None)
+    other = anchor.make_entry(
+        "GENESIS",
+        anchored_at=KAT_AT_1,
+        label="some-other-chain",
+        seq=1,
+        n_entries=2,
+        root="a" * 64,
+        key=None,
+    )
     write_ledger([other], ledger_p)
-    assert anchor.main(["check", chain_p, "--ledger", ledger_p]) == 0            # warn only
-    assert anchor.main(["check", chain_p, "--ledger", ledger_p,
-                        "--require-anchor"]) == 1                                # CI gate
+    assert anchor.main(["check", chain_p, "--ledger", ledger_p]) == 0  # warn only
+    assert anchor.main(["check", chain_p, "--ledger", ledger_p, "--require-anchor"]) == 1  # CI gate
 
 
 def test_empty_chain_checkpoint(paths):
@@ -276,10 +352,13 @@ def test_empty_chain_checkpoint(paths):
 def test_unicode_label(paths):
     chain_p, ledger_p = paths
     write_chain(FIXED_EVENTS, chain_p)
-    assert anchor.main(["anchor", chain_p, "--ledger", ledger_p,
-                        "--at", KAT_AT_1, "--label", "病歷鏈-alice"]) == 0
-    assert anchor.main(["check", chain_p, "--ledger", ledger_p,
-                        "--label", "病歷鏈-alice"]) == 0
+    assert (
+        anchor.main(
+            ["anchor", chain_p, "--ledger", ledger_p, "--at", KAT_AT_1, "--label", "病歷鏈-alice"]
+        )
+        == 0
+    )
+    assert anchor.main(["check", chain_p, "--ledger", ledger_p, "--label", "病歷鏈-alice"]) == 0
     assert _independent_verify_ledger(attest.read_jsonl(ledger_p), None)
 
 

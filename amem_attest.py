@@ -33,7 +33,15 @@ CLI:
   python amem_attest.py root   <chain.jsonl>
   python amem_attest.py --selftest
 """
-import argparse, hashlib, hmac, json, os, sys, time, uuid
+
+import argparse
+import hashlib
+import hmac
+import json
+import os
+import sys
+import time
+import uuid
 import signal
 
 GENESIS = "GENESIS"
@@ -41,8 +49,9 @@ GENESIS = "GENESIS"
 
 def canonical(payload) -> bytes:
     """Stable serialization — the cross-machine/replay-safe form (industry #1 gotcha)."""
-    return json.dumps(payload, sort_keys=True, separators=(",", ":"),
-                      ensure_ascii=False).encode("utf-8")
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(
+        "utf-8"
+    )
 
 
 def digest(prev_hash: str, payload, key: bytes | None) -> str:
@@ -68,13 +77,17 @@ def build_chain(events, key: bytes | None):
     chain, prev = [], GENESIS
     for seq, ev in enumerate(events):
         ts = ev.get("created_at")
-        rfc3339 = (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
-                   if isinstance(ts, (int, float)) else None)
+        rfc3339 = (
+            time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
+            if isinstance(ts, (int, float))
+            else None
+        )
         entry = {
             "seq": seq,
-            "event_id": ev.get("id") or f"evt-{uuid.uuid5(uuid.NAMESPACE_OID, str(seq)+canonical(ev).decode())}",
+            "event_id": ev.get("id")
+            or f"evt-{uuid.uuid5(uuid.NAMESPACE_OID, str(seq) + canonical(ev).decode())}",
             "ts": rfc3339,
-            "payload": ev,           # the original op-log event, verbatim
+            "payload": ev,  # the original op-log event, verbatim
             "prev_hash": prev,
         }
         entry["curr_hash"] = digest(prev, _payload_for_hash(entry), key)
@@ -120,7 +133,9 @@ def _load_key(args):
 def main(argv=None):
     if hasattr(signal, "SIGPIPE"):  # standard CLI: exit quietly (141) when piped to head/less
         signal.signal(signal.SIGPIPE, signal.SIG_DFL)
-    ap = argparse.ArgumentParser(description="tamper-evident hash-chained attestation for amem op-log")
+    ap = argparse.ArgumentParser(
+        description="tamper-evident hash-chained attestation for amem op-log"
+    )
     ap.add_argument("cmd", nargs="?", choices=["attest", "verify", "root"])
     ap.add_argument("path", nargs="?")
     ap.add_argument("--out")
@@ -132,12 +147,17 @@ def main(argv=None):
     if args.selftest:
         return _selftest()
     if not args.cmd or not args.path:
-        sys.exit("usage: amem_attest.py {attest|verify|root} <file> [--out chain.jsonl] [--key K|--keyfile F]")
+        sys.exit(
+            "usage: amem_attest.py {attest|verify|root} <file> [--out chain.jsonl] [--key K|--keyfile F]"
+        )
     if not os.path.exists(args.path):
         sys.exit(f"file not found: {args.path}")
     key = _load_key(args)
-    mode = "HMAC-SHA256 (tamper-evident vs. credentialed attacker)" if key else \
-           "SHA-256 (tamper-evident vs. uncredentialed modification)"
+    mode = (
+        "HMAC-SHA256 (tamper-evident vs. credentialed attacker)"
+        if key
+        else "SHA-256 (tamper-evident vs. uncredentialed modification)"
+    )
 
     if args.cmd == "attest":
         events = read_jsonl(args.path)
@@ -149,7 +169,9 @@ def main(argv=None):
         print(f"attested {len(chain)} events -> {out}")
         print(f"  mode: {mode}")
         print(f"  root (commitment): {root_of(chain)}")
-        print("  anchor this root externally (WORM/notary) for full assurance; this layer is tamper-EVIDENT, not tamper-PROOF.")
+        print(
+            "  anchor this root externally (WORM/notary) for full assurance; this layer is tamper-EVIDENT, not tamper-PROOF."
+        )
     elif args.cmd == "verify":
         chain = read_jsonl(args.path)
         ok, bad, reason = verify_chain(chain, key)
@@ -167,8 +189,20 @@ def main(argv=None):
 def _selftest():
     # a small op-log like amem memory.py emits
     events = [
-        {"op": "add", "id": "a", "text": "user works at Boeing", "key": "employer", "created_at": 1.0},
-        {"op": "add", "id": "b", "text": "user works at Airbus", "key": "employer", "created_at": 2.0},
+        {
+            "op": "add",
+            "id": "a",
+            "text": "user works at Boeing",
+            "key": "employer",
+            "created_at": 1.0,
+        },
+        {
+            "op": "add",
+            "id": "b",
+            "text": "user works at Airbus",
+            "key": "employer",
+            "created_at": 2.0,
+        },
         {"op": "update", "id": "b", "text": "user works at Airbus (verified)", "created_at": 3.0},
         {"op": "forget", "id": "a", "created_at": 4.0},
     ]
@@ -180,14 +214,16 @@ def _selftest():
 
         # 1) MODIFY a byte in a past payload -> must fail at that seq
         tampered = json.loads(json.dumps(chain))
-        tampered[1]["payload"]["text"] = "user works at Boeing"   # attacker flips employer
+        tampered[1]["payload"]["text"] = "user works at Boeing"  # attacker flips employer
         ok, bad, _ = verify_chain(tampered, key)
-        assert not ok and bad == 1, f"modification must be detected at seq 1 (got ok={ok}, bad={bad})"
+        assert not ok and bad == 1, (
+            f"modification must be detected at seq 1 (got ok={ok}, bad={bad})"
+        )
 
         # 2) DELETE an entry -> chain breaks (prev_hash mismatch)
         tampered = json.loads(json.dumps(chain))
         del tampered[1]
-        for i, e in enumerate(tampered):     # renumber seq as a naive attacker would
+        for i, e in enumerate(tampered):  # renumber seq as a naive attacker would
             e["seq"] = i
         ok, bad, _ = verify_chain(tampered, key)
         assert not ok, "deletion must be detected"
@@ -202,14 +238,20 @@ def _selftest():
     chain = build_chain(events, b"real-key")
     forged = json.loads(json.dumps(chain))
     forged[1]["payload"]["text"] = "tampered"
-    forged[1]["curr_hash"] = digest(forged[0]["curr_hash"], _payload_for_hash(forged[1]), b"attacker-guess")
+    forged[1]["curr_hash"] = digest(
+        forged[0]["curr_hash"], _payload_for_hash(forged[1]), b"attacker-guess"
+    )
     ok, _, _ = verify_chain(forged, b"real-key")
     assert not ok, "HMAC must reject a chain recomputed with the wrong key"
 
     # 5) canonical serialization is order-independent for dict keys
-    assert canonical({"a": 1, "b": 2}) == canonical({"b": 2, "a": 1}), "canonical must be key-order stable"
+    assert canonical({"a": 1, "b": 2}) == canonical({"b": 2, "a": 1}), (
+        "canonical must be key-order stable"
+    )
 
-    print("✅ amem_attest selftest passed: build/verify, modify@seq, delete, reorder, HMAC-forgery, canonical-stable.")
+    print(
+        "✅ amem_attest selftest passed: build/verify, modify@seq, delete, reorder, HMAC-forgery, canonical-stable."
+    )
     return 0
 
 

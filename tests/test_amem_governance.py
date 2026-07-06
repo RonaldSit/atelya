@@ -3,6 +3,7 @@ retention / summary / CLI, pinned to the shipped semantics (no aspirational asse
 
 Run:  pytest tests/test_amem_governance.py -v
 """
+
 import copy
 import importlib.util
 import json
@@ -29,11 +30,29 @@ gov = _load("amem_governance")
 
 # ---- shared fixture: one op-log exercising every lifecycle path ------------------
 BASE = [
-    {"op": "add", "id": "a", "text": "user works at Boeing", "key": "employer", "created_at": 1000.0},
-    {"op": "add", "id": "b", "text": "user works at Airbus", "key": "employer", "created_at": 2000.0},
+    {
+        "op": "add",
+        "id": "a",
+        "text": "user works at Boeing",
+        "key": "employer",
+        "created_at": 1000.0,
+    },
+    {
+        "op": "add",
+        "id": "b",
+        "text": "user works at Airbus",
+        "key": "employer",
+        "created_at": 2000.0,
+    },
     {"op": "update", "id": "b", "text": "user works at Airbus (verified)", "created_at": 3000.0},
-    {"op": "add", "id": "c", "text": "allergic to penicillin", "key": "allergy", "created_at": 4000.0,
-     "actor": "nurse"},
+    {
+        "op": "add",
+        "id": "c",
+        "text": "allergic to penicillin",
+        "key": "allergy",
+        "created_at": 4000.0,
+        "actor": "nurse",
+    },
     {"op": "flag", "a": "a", "b": "b", "why": "employer conflict", "created_at": 4500.0},
     {"op": "forget", "id": "c", "created_at": 5000.0},
 ]
@@ -82,8 +101,10 @@ def test_replay_update_and_forget():
 
 
 def test_replay_purge_redacts_and_autoid():
-    evs = copy.deepcopy(BASE) + [{"op": "purge", "id": "b", "created_at": 6000.0},
-                                 {"op": "add", "text": "no id given"}]
+    evs = copy.deepcopy(BASE) + [
+        {"op": "purge", "id": "b", "created_at": 6000.0},
+        {"op": "add", "text": "no id given"},
+    ]
     rec, order = gov.replay(evs)
     assert rec["b"]["status"] == "purged" and rec["b"]["text"] == "<redacted>"
     auto = [r for r in order if str(r).startswith("_auto")]
@@ -98,8 +119,10 @@ def test_audit_timeline_rows_and_flag_detail():
     flag = rows[4]
     assert flag["op"] == "flag" and flag["id"] == "a"
     assert "contradiction a=a b=b" in flag["detail"]
-    t = rows[0]["time"]                      # created_at=1000.0 renders as a timestamp;
-    assert len(t) == 19 and t[4] == "-" and t[10] == "T"   # tz-agnostic (local year may be 1969/1970)
+    t = rows[0]["time"]  # created_at=1000.0 renders as a timestamp;
+    assert (
+        len(t) == 19 and t[4] == "-" and t[10] == "T"
+    )  # tz-agnostic (local year may be 1969/1970)
 
 
 def test_export_json_roundtrip(tmp_path):
@@ -124,7 +147,7 @@ def test_lineage_tracks_id_and_flag_edges():
     evs = copy.deepcopy(BASE)
     ops_a = [op for _, op, _ in gov.lineage(evs, "a")]
     ops_b = [op for _, op, _ in gov.lineage(evs, "b")]
-    assert ops_a == ["add", "flag"]          # flag references a via the `a` edge
+    assert ops_a == ["add", "flag"]  # flag references a via the `a` edge
     assert ops_b == ["add", "update", "flag"]
 
 
@@ -149,10 +172,10 @@ def test_erase_soft_appends_forget_and_retains_text(logfile):
     r = gov.erase(logfile, "Airbus", hard=False)
     assert r == {"matched": 1, "mode": "soft", "ids": ["b"]}
     evs = gov.read_log(logfile)
-    assert len(evs) == len(BASE) + 1                       # forget appended, nothing removed
+    assert len(evs) == len(BASE) + 1  # forget appended, nothing removed
     assert evs[-1]["op"] == "forget" and evs[-1]["id"] == "b"
     assert evs[-1]["reason"] == "erasure:/Airbus/"
-    assert any("Airbus" in (e.get("text") or "") for e in evs)   # auditable: text retained
+    assert any("Airbus" in (e.get("text") or "") for e in evs)  # auditable: text retained
     rec, _ = gov.replay(evs)
     assert rec["b"]["status"] == "deleted"
 
@@ -173,31 +196,33 @@ def test_erase_hard_removes_content_logs_purge_and_resurrects_predecessor(logfil
     assert len(evs) == 4
     purge = evs[-1]
     assert purge["op"] == "purge" and purge["id"] == "b"
-    assert purge["note"] == "content removed for compliance"   # the purge itself is logged
+    assert purge["note"] == "content removed for compliance"  # the purge itself is logged
     # honest note: the marker's reason records the erasure *pattern* verbatim — erase by
     # label/id-pattern, not by pasting the literal secret (0.2: consider hashing it)
     assert purge["reason"] == "erasure:/Airbus/"
-    assert not any(e.get("op") == "flag" for e in evs)      # erase-hard drops referencing flags
+    assert not any(e.get("op") == "flag" for e in evs)  # erase-hard drops referencing flags
     rec, _ = gov.replay(evs)
-    assert "b" not in rec                                   # purge marker alone creates no record
+    assert "b" not in rec  # purge marker alone creates no record
     # documented quirk: with the superseding add gone, the predecessor is active again
     assert rec["a"]["status"] == "active"
 
 
 # ================================ retention =======================================
 def test_retention_age_soft_retires_stale_active(logfile):
-    r = gov.retention(logfile, max_age_days=1, hard=False)   # created_at epoch-1970 => stale
+    r = gov.retention(logfile, max_age_days=1, hard=False)  # created_at epoch-1970 => stale
     assert r["retired"] == 1 and r["ids"] == ["b"] and r["mode"] == "soft"
     rec, _ = gov.replay(gov.read_log(logfile))
-    assert rec["b"]["status"] == "deleted"                   # only active records are retired
+    assert rec["b"]["status"] == "deleted"  # only active records are retired
 
 
 def test_retention_max_active_retires_oldest_first(tmp_path):
-    evs = [{"op": "add", "id": f"m{i}", "text": f"t{i}", "key": f"k{i}", "created_at": float(i)}
-           for i in (1, 2, 3)]
+    evs = [
+        {"op": "add", "id": f"m{i}", "text": f"t{i}", "key": f"k{i}", "created_at": float(i)}
+        for i in (1, 2, 3)
+    ]
     p = write_log(tmp_path / "ops.jsonl", evs)
     r = gov.retention(p, max_active=1, hard=False)
-    assert r["retired"] == 2 and r["ids"] == ["m1", "m2"]    # oldest first
+    assert r["retired"] == 2 and r["ids"] == ["m1", "m2"]  # oldest first
     rec, _ = gov.replay(gov.read_log(p))
     assert rec["m3"]["status"] == "active"
 
@@ -219,17 +244,17 @@ def test_summary_counts_and_actor_tracking():
     assert s["events"] == 6 and s["memories"] == 3
     assert s["by_status"] == {"superseded": 1, "active": 1, "deleted": 1}
     assert s["contradiction_flags"] == 1
-    assert s["actor_tracking"] == "present"                  # c carries actor="nurse"
+    assert s["actor_tracking"] == "present"  # c carries actor="nurse"
 
 
 # ================================== CLI ===========================================
 def test_cli_guard_exits(logfile):
     with pytest.raises(SystemExit):
-        gov.main([])                                         # usage
+        gov.main([])  # usage
     with pytest.raises(SystemExit):
-        gov.main(["lineage", logfile])                       # --id required
+        gov.main(["lineage", logfile])  # --id required
     with pytest.raises(SystemExit):
-        gov.main(["audit", logfile + ".nope"])               # op-log not found
+        gov.main(["audit", logfile + ".nope"])  # op-log not found
 
 
 def test_cli_audit_export_rc0(logfile, tmp_path, capsys):

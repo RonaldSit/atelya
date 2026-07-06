@@ -37,10 +37,17 @@ the 2026 audit-trail pattern (arXiv 2601.20727; NIST SP 800-92). Tamper-EVIDENT,
 tamper-PROOF: any modification/deletion/reorder is detected and located; anchor the printed
 root externally (WORM/notary) for full assurance.
 """
-import argparse, csv, json, os, re, sys, time
+
+import argparse
+import csv
+import json
+import os
+import re
+import sys
+import time
 import signal
 
-OPS_WRITE = {"add", "update"}          # events that carry/define content
+OPS_WRITE = {"add", "update"}  # events that carry/define content
 
 
 def read_log(path):
@@ -52,11 +59,18 @@ def read_log(path):
                 continue
             try:
                 ev = json.loads(line)
-            except ValueError:  # malformed / non-JSON line -> skip (JSONDecodeError is a ValueError)
+            except (
+                ValueError
+            ):  # malformed / non-JSON line -> skip (JSONDecodeError is a ValueError)
                 continue
-            if "op" not in ev and "text" in ev:        # legacy {"text":...} == add
-                ev = {"op": "add", "text": ev["text"], "id": ev.get("id"), "key": ev.get("key"),
-                      "created_at": ev.get("created_at")}
+            if "op" not in ev and "text" in ev:  # legacy {"text":...} == add
+                ev = {
+                    "op": "add",
+                    "text": ev["text"],
+                    "id": ev.get("id"),
+                    "key": ev.get("key"),
+                    "created_at": ev.get("created_at"),
+                }
             out.append(ev)
     return out
 
@@ -70,23 +84,35 @@ def replay(events):
         rid = ev.get("id")
         if op == "add":
             if rid and ev.get("key") is not None:
-                for r in rec.values():                  # same-key supersede (the lifecycle)
+                for r in rec.values():  # same-key supersede (the lifecycle)
                     if r["status"] == "active" and r.get("key") == ev.get("key"):
-                        r["status"] = "superseded"; r["history"].append("superseded-by-" + str(rid))
+                        r["status"] = "superseded"
+                        r["history"].append("superseded-by-" + str(rid))
             if rid is None:
                 rid = f"_auto{len(order)}"
-            rec[rid] = {"id": rid, "text": ev.get("text", ""), "key": ev.get("key"),
-                        "created_at": ev.get("created_at"), "status": "active",
-                        "actor": ev.get("actor") or ev.get("source"), "history": ["add"]}
+            rec[rid] = {
+                "id": rid,
+                "text": ev.get("text", ""),
+                "key": ev.get("key"),
+                "created_at": ev.get("created_at"),
+                "status": "active",
+                "actor": ev.get("actor") or ev.get("source"),
+                "history": ["add"],
+            }
             order.append(rid)
         elif op == "update" and rid in rec:
-            rec[rid]["text"] = ev.get("text", rec[rid]["text"]); rec[rid]["history"].append("update")
+            rec[rid]["text"] = ev.get("text", rec[rid]["text"])
+            rec[rid]["history"].append("update")
         elif op == "supersede" and rid in rec:
-            rec[rid]["status"] = "superseded"; rec[rid]["history"].append("supersede")
+            rec[rid]["status"] = "superseded"
+            rec[rid]["history"].append("supersede")
         elif op == "forget" and rid in rec:
-            rec[rid]["status"] = "deleted"; rec[rid]["history"].append("forget")
+            rec[rid]["status"] = "deleted"
+            rec[rid]["history"].append("forget")
         elif op == "purge" and rid in rec:
-            rec[rid]["status"] = "purged"; rec[rid]["text"] = "<redacted>"; rec[rid]["history"].append("purge")
+            rec[rid]["status"] = "purged"
+            rec[rid]["text"] = "<redacted>"
+            rec[rid]["history"].append("purge")
     return rec, order
 
 
@@ -103,8 +129,16 @@ def audit_timeline(events):
             rid = ev.get("id")
             txt = (ev.get("text") or "")[:80]
             detail = txt + (f"  [key={ev.get('key')}]" if ev.get("key") else "")
-        rows.append({"seq": i, "time": when, "op": op, "id": rid or "",
-                     "actor": ev.get("actor") or ev.get("source") or "", "detail": detail})
+        rows.append(
+            {
+                "seq": i,
+                "time": when,
+                "op": op,
+                "id": rid or "",
+                "actor": ev.get("actor") or ev.get("source") or "",
+                "detail": detail,
+            }
+        )
     return rows
 
 
@@ -113,7 +147,8 @@ def export(rows, out):
     if fmt == "csv":
         with open(out, "w", newline="", encoding="utf-8") as f:
             w = csv.DictWriter(f, fieldnames=["seq", "time", "op", "id", "actor", "detail"])
-            w.writeheader(); w.writerows(rows)
+            w.writeheader()
+            w.writerows(rows)
     else:
         with open(out, "w", encoding="utf-8") as fh:
             json.dump(rows, fh, indent=1, ensure_ascii=False)
@@ -135,10 +170,23 @@ def conflicts(events):
         if ev.get("op") == "flag":
             a, b = ev.get("a"), ev.get("b")
             # winner = whichever side is still active (the lifecycle prefers newer/active)
-            wa = rec.get(a, {}).get("status"); wb = rec.get(b, {}).get("status")
-            winner = a if wa == "active" and wb != "active" else (b if wb == "active" and wa != "active" else "unresolved")
-            out.append({"a": a, "b": b, "why": ev.get("why"), "a_status": wa, "b_status": wb,
-                        "winner": winner})
+            wa = rec.get(a, {}).get("status")
+            wb = rec.get(b, {}).get("status")
+            winner = (
+                a
+                if wa == "active" and wb != "active"
+                else (b if wb == "active" and wa != "active" else "unresolved")
+            )
+            out.append(
+                {
+                    "a": a,
+                    "b": b,
+                    "why": ev.get("why"),
+                    "a_status": wa,
+                    "b_status": wb,
+                    "winner": winner,
+                }
+            )
     return out
 
 
@@ -158,15 +206,34 @@ def erase(path, pattern, hard=False):
     if not hard:
         with open(path, "a", encoding="utf-8") as f:
             for rid in targets:
-                f.write(json.dumps({"op": "forget", "id": rid,
-                                    "reason": f"erasure:/{pattern}/", "created_at": time.time()}) + "\n")
+                f.write(
+                    json.dumps(
+                        {
+                            "op": "forget",
+                            "id": rid,
+                            "reason": f"erasure:/{pattern}/",
+                            "created_at": time.time(),
+                        }
+                    )
+                    + "\n"
+                )
         return {"matched": len(targets), "mode": "soft", "ids": sorted(targets)}
     # hard purge: filter out add/update/supersede/forget for targets; keep a purge audit marker
-    kept = [ev for ev in events if ev.get("id") not in targets and ev.get("a") not in targets
-            and ev.get("b") not in targets]
+    kept = [
+        ev
+        for ev in events
+        if ev.get("id") not in targets and ev.get("a") not in targets and ev.get("b") not in targets
+    ]
     for rid in sorted(targets):
-        kept.append({"op": "purge", "id": rid, "reason": f"erasure:/{pattern}/",
-                     "created_at": time.time(), "note": "content removed for compliance"})
+        kept.append(
+            {
+                "op": "purge",
+                "id": rid,
+                "reason": f"erasure:/{pattern}/",
+                "created_at": time.time(),
+                "note": "content removed for compliance",
+            }
+        )
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         for ev in kept:
@@ -182,12 +249,15 @@ def retention(path, max_age_days=None, max_active=None, hard=False):
     doomed = []
     if max_age_days is not None:
         cut = now - max_age_days * 86400
-        doomed += [rid for rid, r in rec.items()
-                   if r["status"] == "active" and (r.get("created_at") or now) < cut]
+        doomed += [
+            rid
+            for rid, r in rec.items()
+            if r["status"] == "active" and (r.get("created_at") or now) < cut
+        ]
     if max_active is not None:
         active = [rid for rid in order if rec[rid]["status"] == "active"]
         if len(active) > max_active:
-            doomed += active[:len(active) - max_active]      # oldest first
+            doomed += active[: len(active) - max_active]  # oldest first
     doomed = sorted(set(doomed))
     if not doomed:
         return {"retired": 0, "mode": "hard" if hard else "soft"}
@@ -203,8 +273,12 @@ def retention(path, max_age_days=None, max_active=None, hard=False):
     else:
         with open(path, "a", encoding="utf-8") as f:
             for rid in doomed:
-                f.write(json.dumps({"op": "forget", "id": rid, "reason": "retention",
-                                    "created_at": now}) + "\n")
+                f.write(
+                    json.dumps(
+                        {"op": "forget", "id": rid, "reason": "retention", "created_at": now}
+                    )
+                    + "\n"
+                )
     return {"retired": len(doomed), "mode": "hard" if hard else "soft", "ids": doomed}
 
 
@@ -214,27 +288,47 @@ def summary(events):
     for r in rec.values():
         st[r["status"]] = st.get(r["status"], 0) + 1
     nflag = sum(1 for ev in events if ev.get("op") == "flag")
-    return {"events": len(events), "memories": len(rec), "by_status": st,
-            "contradiction_flags": nflag,
-            "auditable": "every add/update/supersede/forget is logged with a timestamp",
-            "actor_tracking": "present" if any(ev.get("actor") or ev.get("source") for ev in events)
-                              else "per-user store isolates writers; stamp 'actor' at write-time for per-identity audit"}
+    return {
+        "events": len(events),
+        "memories": len(rec),
+        "by_status": st,
+        "contradiction_flags": nflag,
+        "auditable": "every add/update/supersede/forget is logged with a timestamp",
+        "actor_tracking": "present"
+        if any(ev.get("actor") or ev.get("source") for ev in events)
+        else "per-user store isolates writers; stamp 'actor' at write-time for per-identity audit",
+    }
 
 
 # ---------------- CLI ----------------
 def _print_rows(rows, n=40):
     print(f"{'seq':>4} {'time':<19} {'op':<11} {'id':<10} {'detail'}")
     for r in rows[:n]:
-        print(f"{r['seq']:>4} {r['time']:<19} {r['op']:<11} {str(r['id'])[:10]:<10} {r['detail'][:70]}")
+        print(
+            f"{r['seq']:>4} {r['time']:<19} {r['op']:<11} {str(r['id'])[:10]:<10} {r['detail'][:70]}"
+        )
     if len(rows) > n:
-        print(f"... (+{len(rows)-n} more; use --out to export full)")
+        print(f"... (+{len(rows) - n} more; use --out to export full)")
 
 
 def main(argv=None):
     if hasattr(signal, "SIGPIPE"):  # standard CLI: exit quietly (141) when piped to head/less
         signal.signal(signal.SIGPIPE, signal.SIG_DFL)
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", nargs="?", choices=["audit", "lineage", "conflicts", "erase", "retention", "summary", "attest", "verify-chain"])
+    ap.add_argument(
+        "cmd",
+        nargs="?",
+        choices=[
+            "audit",
+            "lineage",
+            "conflicts",
+            "erase",
+            "retention",
+            "summary",
+            "attest",
+            "verify-chain",
+        ],
+    )
     ap.add_argument("oplog", nargs="?")
     ap.add_argument("--id")
     ap.add_argument("--match")
@@ -250,7 +344,9 @@ def main(argv=None):
     if args.selftest:
         return _selftest()
     if not args.cmd or not args.oplog:
-        sys.exit("usage: amem_governance.py {audit|lineage|conflicts|erase|retention|summary} <oplog.jsonl> [...]")
+        sys.exit(
+            "usage: amem_governance.py {audit|lineage|conflicts|erase|retention|summary} <oplog.jsonl> [...]"
+        )
     if not os.path.exists(args.oplog):
         sys.exit(f"op-log not found: {args.oplog}")
     events = read_log(args.oplog)
@@ -290,25 +386,34 @@ def main(argv=None):
     if args.cmd == "audit":
         rows = audit_timeline(events)
         if args.out:
-            out, fmt = export(rows, args.out); print(f"exported {len(rows)} events -> {out} ({fmt})")
+            out, fmt = export(rows, args.out)
+            print(f"exported {len(rows)} events -> {out} ({fmt})")
         else:
             _print_rows(rows)
     elif args.cmd == "summary":
         print(json.dumps(summary(events), indent=1, ensure_ascii=False))
     elif args.cmd == "lineage":
-        if not args.id: sys.exit("--id required")
+        if not args.id:
+            sys.exit("--id required")
         for i, op, ev in lineage(events, args.id):
-            print(f"  seq={i:<4} {op:<11} {json.dumps({k: v for k, v in ev.items() if k != 'op'}, ensure_ascii=False)[:100]}")
+            print(
+                f"  seq={i:<4} {op:<11} {json.dumps({k: v for k, v in ev.items() if k != 'op'}, ensure_ascii=False)[:100]}"
+            )
     elif args.cmd == "conflicts":
         c = conflicts(events)
         print(f"{len(c)} contradiction(s):")
         for x in c:
-            print(f"  a={x['a']}({x['a_status']}) b={x['b']}({x['b_status']}) why={x['why']} -> winner={x['winner']}")
+            print(
+                f"  a={x['a']}({x['a_status']}) b={x['b']}({x['b_status']}) why={x['why']} -> winner={x['winner']}"
+            )
     elif args.cmd == "erase":
-        if not args.match: sys.exit("--match <regex> required")
+        if not args.match:
+            sys.exit("--match <regex> required")
         r = erase(args.oplog, args.match, hard=args.hard)
         print(json.dumps(r, ensure_ascii=False))
-        print(f"  {'HARD PURGE (content removed)' if args.hard else 'SOFT forget (auditable; text retained in log)'}")
+        print(
+            f"  {'HARD PURGE (content removed)' if args.hard else 'SOFT forget (auditable; text retained in log)'}"
+        )
     elif args.cmd == "retention":
         r = retention(args.oplog, args.max_age_days, args.max_active, hard=args.hard)
         print(json.dumps(r, ensure_ascii=False))
@@ -317,27 +422,55 @@ def main(argv=None):
 
 def _selftest():
     import tempfile
+
     p = os.path.join(tempfile.mkdtemp(prefix="gov_"), "ops.jsonl")
     t0 = time.time() - 100 * 86400
     evs = [
         {"op": "add", "id": "a", "text": "User works at Boeing.", "key": "job", "created_at": t0},
-        {"op": "add", "id": "b", "text": "User works at SpaceX.", "key": "job", "created_at": t0 + 86400},  # supersedes a
-        {"op": "add", "id": "c", "text": "User SSN is 123-45-6789.", "key": "ssn", "created_at": t0 + 2 * 86400},
-        {"op": "update", "id": "c", "text": "User SSN is 123-45-6789 (verified).", "created_at": t0 + 3 * 86400},
+        {
+            "op": "add",
+            "id": "b",
+            "text": "User works at SpaceX.",
+            "key": "job",
+            "created_at": t0 + 86400,
+        },  # supersedes a
+        {
+            "op": "add",
+            "id": "c",
+            "text": "User SSN is 123-45-6789.",
+            "key": "ssn",
+            "created_at": t0 + 2 * 86400,
+        },
+        {
+            "op": "update",
+            "id": "c",
+            "text": "User SSN is 123-45-6789 (verified).",
+            "created_at": t0 + 3 * 86400,
+        },
         {"op": "flag", "a": "a", "b": "b", "why": "neg"},
-        {"op": "add", "id": "d", "text": "User likes jazz.", "key": "music", "created_at": time.time()},
+        {
+            "op": "add",
+            "id": "d",
+            "text": "User likes jazz.",
+            "key": "music",
+            "created_at": time.time(),
+        },
     ]
     with open(p, "w", encoding="utf-8") as f:
-        for e in evs: f.write(json.dumps(e) + "\n")
+        for e in evs:
+            f.write(json.dumps(e) + "\n")
 
     events = read_log(p)
     rec, _ = replay(events)
-    assert rec["a"]["status"] == "superseded" and rec["b"]["status"] == "active", "same-key supersede"
+    assert rec["a"]["status"] == "superseded" and rec["b"]["status"] == "active", (
+        "same-key supersede"
+    )
     assert "verified" in rec["c"]["text"], "update applied"
 
     rows = audit_timeline(events)
     assert len(rows) == 6 and rows[0]["op"] == "add", "audit timeline"
-    out, fmt = export(rows, p + ".csv"); assert os.path.exists(out)
+    out, fmt = export(rows, p + ".csv")
+    assert os.path.exists(out)
 
     c = conflicts(events)
     assert c and c[0]["winner"] == "b", f"conflict winner should be active side: {c}"
@@ -355,7 +488,9 @@ def _selftest():
     # GDPR hard purge: SSN content removed from the log entirely
     r = erase(p, "SSN", hard=True)
     assert r["mode"] == "hard", r
-    assert not any("123-45-6789" in (e.get("text") or "") for e in read_log(p)), "hard: content gone"
+    assert not any("123-45-6789" in (e.get("text") or "") for e in read_log(p)), (
+        "hard: content gone"
+    )
     assert any(e.get("op") == "purge" for e in read_log(p)), "hard: purge action logged"
 
     # retention by age: the 100-day-old active record(s) retired
@@ -365,6 +500,7 @@ def _selftest():
     # integration: attest the op-log, verify passes; mutate one byte, verify fails
     try:
         import amem_attest as _att
+
         _ev = read_log(p)
         _chain = _att.build_chain(_ev, None)
         _ok, _, _ = _att.verify_chain(_chain, None)
@@ -375,8 +511,10 @@ def _selftest():
     except ImportError:
         print("  (amem_attest not present — integration check skipped)")
 
-    print("SELFTEST PASS: replay+supersede, audit export, conflict winner, lineage, "
-          "GDPR soft-forget (retained) vs hard-purge (removed), retention. (no amem/GPU/API)")
+    print(
+        "SELFTEST PASS: replay+supersede, audit export, conflict winner, lineage, "
+        "GDPR soft-forget (retained) vs hard-purge (removed), retention. (no amem/GPU/API)"
+    )
     return 0
 
 

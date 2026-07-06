@@ -61,7 +61,12 @@ CLI:
 Exit codes: 0 = ok · 1 = check/input failure · 2 = anchor refused
 (invalid chain, or C2SP inconsistency with a previously anchored checkpoint).
 """
-import argparse, json, os, sys, time
+
+import argparse
+import json
+import os
+import sys
+import time
 import signal
 
 # ---- reuse amem_attest's canonical/digest/read/verify (ONE hash construction) ----
@@ -69,6 +74,7 @@ try:
     import amem_attest as attest
 except ImportError:  # loaded from another cwd (e.g. tests/) — resolve next to this file
     import importlib.util
+
     _p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "amem_attest.py")
     _s = importlib.util.spec_from_file_location("amem_attest", _p)
     attest = importlib.util.module_from_spec(_s)
@@ -82,8 +88,16 @@ CP_FIELDS = ("v", "kind", "anchored_at", "label", "seq", "n_entries", "root", "p
 # ------------------------------------------------------------------ core ----
 def make_entry(prev_hash, *, anchored_at, label, seq, n_entries, root, key=None):
     """Build one hash-chained checkpoint entry (exposed for tests)."""
-    e = {"v": 1, "kind": KIND, "anchored_at": anchored_at, "label": label,
-         "seq": seq, "n_entries": n_entries, "root": root, "prev_hash": prev_hash}
+    e = {
+        "v": 1,
+        "kind": KIND,
+        "anchored_at": anchored_at,
+        "label": label,
+        "seq": seq,
+        "n_entries": n_entries,
+        "root": root,
+        "prev_hash": prev_hash,
+    }
     e["curr_hash"] = attest.digest(prev_hash, {k: e[k] for k in CP_FIELDS}, key)
     return e
 
@@ -121,11 +135,15 @@ def consistency(chain, cp):
     if seq is None or seq != n - 1:
         return False, "malformed checkpoint (seq/n_entries mismatch)"
     if len(chain) <= seq:
-        return False, (f"chain has {len(chain)} entries but checkpoint anchors seq={seq}"
-                       " — history truncated/vanished below an anchored checkpoint")
+        return False, (
+            f"chain has {len(chain)} entries but checkpoint anchors seq={seq}"
+            " — history truncated/vanished below an anchored checkpoint"
+        )
     if chain[seq].get("curr_hash") != cp.get("root"):
-        return False, (f"chain hash at seq={seq} != anchored root"
-                       " — history rewritten (same-position different-root conflict)")
+        return False, (
+            f"chain hash at seq={seq} != anchored root"
+            " — history rewritten (same-position different-root conflict)"
+        )
     return True, "consistent"
 
 
@@ -137,9 +155,17 @@ def monotonic(cps):
         seq = -1 if cp.get("seq") is None else cp["seq"]
         if seen:
             if seq < last_seq:
-                return False, i, f"checkpoint seq decreased ({last_seq} -> {seq}) — witness-order violation"
+                return (
+                    False,
+                    i,
+                    f"checkpoint seq decreased ({last_seq} -> {seq}) — witness-order violation",
+                )
             if seq == last_seq and cp.get("root") != last_root:
-                return False, i, "same anchored position with a different root — conflict (C2SP 409 analogue)"
+                return (
+                    False,
+                    i,
+                    "same anchored position with a different root — conflict (C2SP 409 analogue)",
+                )
         last_seq, last_root, seen = seq, cp.get("root"), True
     return True, None, "monotonic"
 
@@ -194,30 +220,37 @@ def cmd_anchor(chain_path, ledger_path, label, akey, ckey, at):
     cps = [e for e in ledger if e.get("label") == label]
     ok, bad, reason = monotonic(cps)
     if not ok:
-        print(f"REFUSED — existing checkpoints for '{label}' violate witness order at #{bad}: {reason}")
+        print(
+            f"REFUSED — existing checkpoints for '{label}' violate witness order at #{bad}: {reason}"
+        )
         return 2
     # C2SP tlog-checkpoint: MUST not sign a checkpoint inconsistent with any prior one.
     for i, cp in enumerate(cps):
         ok, reason = consistency(chain, cp)
         if not ok:
-            print(f"REFUSED — chain is inconsistent with previously anchored checkpoint #{i} "
-                  f"(anchored_at {cp.get('anchored_at')}): {reason}")
-            print("  (C2SP tlog-checkpoint rule: a log MUST NOT sign a checkpoint "
-                  "inconsistent with one it previously signed.)")
+            print(
+                f"REFUSED — chain is inconsistent with previously anchored checkpoint #{i} "
+                f"(anchored_at {cp.get('anchored_at')}): {reason}"
+            )
+            print(
+                "  (C2SP tlog-checkpoint rule: a log MUST NOT sign a checkpoint "
+                "inconsistent with one it previously signed.)"
+            )
             return 2
     if cps and cps[-1].get("seq") == seq and cps[-1].get("root") == root:
         print(f"already anchored at this head (seq={seq}, root={str(root)[:16]}…) — no change")
         return 0
 
     prev = ledger[-1]["curr_hash"] if ledger else GENESIS
-    entry = make_entry(prev, anchored_at=at, label=label, seq=seq, n_entries=n,
-                       root=root, key=akey)
+    entry = make_entry(prev, anchored_at=at, label=label, seq=seq, n_entries=n, root=root, key=akey)
     _append_ledger(ledger_path, entry)
     mode = "HMAC-SHA256" if akey else "SHA-256"
     print(f"anchored '{label}' head (seq={seq}, n={n}) -> {ledger_path}  (ledger mode: {mode})")
     print(f"  checkpoint root: {root}")
-    print("  NOTE: this ledger must live under SEPARATE control (different account/host/"
-          "WORM store) to defeat a credentialed attacker — see ATTESTATION.md §6.")
+    print(
+        "  NOTE: this ledger must live under SEPARATE control (different account/host/"
+        "WORM store) to defeat a credentialed attacker — see ATTESTATION.md §6."
+    )
     return 0
 
 
@@ -243,8 +276,10 @@ def cmd_check(chain_path, ledger_path, label, akey, ckey, require_anchor):
             print(f"FAIL — {msg} (--require-anchor)")
             return 1
         print(f"WARN — {msg}")
-        print(f"OK — chain intact ({len(chain)} entries), ledger intact ({len(ledger)} checkpoint(s)), "
-              f"0 checkpoints to compare")
+        print(
+            f"OK — chain intact ({len(chain)} entries), ledger intact ({len(ledger)} checkpoint(s)), "
+            f"0 checkpoints to compare"
+        )
         return 0
 
     ok, bad, reason = monotonic(cps)
@@ -254,16 +289,22 @@ def cmd_check(chain_path, ledger_path, label, akey, ckey, require_anchor):
     for i, cp in enumerate(cps):
         ok, reason = consistency(chain, cp)
         if not ok:
-            print(f"FAIL — ANCHOR CONFLICT vs checkpoint #{i} "
-                  f"(anchored_at {cp.get('anchored_at')}, seq={cp.get('seq')}): {reason}")
+            print(
+                f"FAIL — ANCHOR CONFLICT vs checkpoint #{i} "
+                f"(anchored_at {cp.get('anchored_at')}, seq={cp.get('seq')}): {reason}"
+            )
             return 1
     last = cps[-1]
     tail = (len(chain) - 1) - (last["seq"] if last.get("seq") is not None else -1)
-    print(f"VERIFIED — chain intact ({len(chain)} entries); ledger intact; "
-          f"{len(cps)} checkpoint(s) for '{label}' all consistent (append-only history confirmed)")
-    print(f"  latest anchor: seq={last.get('seq')} at {last.get('anchored_at')}; "
-          f"unanchored tail: {tail} entr{'y' if tail == 1 else 'ies'}"
-          + ("" if tail == 0 else "  -> run `anchor` to cover them"))
+    print(
+        f"VERIFIED — chain intact ({len(chain)} entries); ledger intact; "
+        f"{len(cps)} checkpoint(s) for '{label}' all consistent (append-only history confirmed)"
+    )
+    print(
+        f"  latest anchor: seq={last.get('seq')} at {last.get('anchored_at')}; "
+        f"unanchored tail: {tail} entr{'y' if tail == 1 else 'ies'}"
+        + ("" if tail == 0 else "  -> run `anchor` to cover them")
+    )
     return 0
 
 
@@ -284,8 +325,12 @@ def cmd_latest(ledger_path, label, akey):
         print(f"no checkpoints for label '{label}'")
         return 1
     for e in rows:
-        print(json.dumps({k: e.get(k) for k in ("label", "seq", "n_entries", "root", "anchored_at")},
-                         ensure_ascii=False))
+        print(
+            json.dumps(
+                {k: e.get(k) for k in ("label", "seq", "n_entries", "root", "anchored_at")},
+                ensure_ascii=False,
+            )
+        )
     return 0
 
 
@@ -293,13 +338,17 @@ def cmd_latest(ledger_path, label, akey):
 def main(argv=None):
     if hasattr(signal, "SIGPIPE"):  # standard CLI: exit quietly (141) when piped to head/less
         signal.signal(signal.SIGPIPE, signal.SIG_DFL)
-    ap = argparse.ArgumentParser(description="external checkpoint/witness ledger for amem attest chains")
+    ap = argparse.ArgumentParser(
+        description="external checkpoint/witness ledger for amem attest chains"
+    )
     ap.add_argument("cmd", nargs="?", choices=["anchor", "check", "latest"])
     ap.add_argument("chain", nargs="?")
     ap.add_argument("--ledger")
     ap.add_argument("--label")
-    ap.add_argument("--key"); ap.add_argument("--keyfile")
-    ap.add_argument("--chain-key", dest="chain_key"); ap.add_argument("--chain-keyfile", dest="chain_keyfile")
+    ap.add_argument("--key")
+    ap.add_argument("--keyfile")
+    ap.add_argument("--chain-key", dest="chain_key")
+    ap.add_argument("--chain-keyfile", dest="chain_keyfile")
     ap.add_argument("--at")
     ap.add_argument("--require-anchor", action="store_true")
     ap.add_argument("--selftest", action="store_true")
@@ -308,7 +357,9 @@ def main(argv=None):
     if args.selftest:
         return _selftest()
     if not args.cmd:
-        print("usage: amem_anchor.py {anchor|check|latest} [<chain.jsonl>] --ledger <ledger.jsonl> [...]")
+        print(
+            "usage: amem_anchor.py {anchor|check|latest} [<chain.jsonl>] --ledger <ledger.jsonl> [...]"
+        )
         return 1
     if not args.ledger:
         print("--ledger is REQUIRED (choose the separately-controlled location deliberately)")
@@ -334,9 +385,18 @@ def main(argv=None):
 # ------------------------------------------------------------------ selftest ----
 def _selftest():
     import tempfile
+
     d = tempfile.mkdtemp(prefix="anchor_")
-    oplog = [{"op": "add", "id": "a", "text": "works at Acme", "key": "job", "created_at": 1.0},
-             {"op": "add", "id": "b", "text": "allergic to penicillin", "key": "allergy", "created_at": 2.0}]
+    oplog = [
+        {"op": "add", "id": "a", "text": "works at Acme", "key": "job", "created_at": 1.0},
+        {
+            "op": "add",
+            "id": "b",
+            "text": "allergic to penicillin",
+            "key": "allergy",
+            "created_at": 2.0,
+        },
+    ]
     chain_p, ledger_p = os.path.join(d, "c.jsonl"), os.path.join(d, "anchors.jsonl")
 
     def write_chain(events):
@@ -353,18 +413,28 @@ def _selftest():
     assert main(["check", chain_p, "--ledger", ledger_p]) == 0
     assert main(["anchor", chain_p, "--ledger", ledger_p, "--at", "2026-01-02T00:00:00Z"]) == 0
     # credentialed attacker: rewrite history AND re-chain — chain verifies, anchor catches it
-    evil = [dict(oplog[0], text="works at Evil"), oplog[1],
-            {"op": "forget", "id": "a", "created_at": 3.0}]
+    evil = [
+        dict(oplog[0], text="works at Evil"),
+        oplog[1],
+        {"op": "forget", "id": "a", "created_at": 3.0},
+    ]
     write_chain(evil)
-    assert attest.verify_chain(attest.read_jsonl(chain_p), None)[0], "re-chained file verifies internally"
-    assert main(["check", chain_p, "--ledger", ledger_p]) == 1, "anchor check must catch the rewrite"
-    assert main(["anchor", chain_p, "--ledger", ledger_p, "--at", "2026-01-03T00:00:00Z"]) == 2, \
+    assert attest.verify_chain(attest.read_jsonl(chain_p), None)[0], (
+        "re-chained file verifies internally"
+    )
+    assert main(["check", chain_p, "--ledger", ledger_p]) == 1, (
+        "anchor check must catch the rewrite"
+    )
+    assert main(["anchor", chain_p, "--ledger", ledger_p, "--at", "2026-01-03T00:00:00Z"]) == 2, (
         "anchor must REFUSE an inconsistent checkpoint (C2SP rule)"
+    )
     # truncation below an anchored checkpoint
     write_chain(oplog[:1])
     assert main(["check", chain_p, "--ledger", ledger_p]) == 1, "history-vanished must be caught"
-    print("SELFTEST PASS: anchor/check, append-only growth, rewrite-after-anchor caught, "
-          "C2SP refuse-inconsistent, truncation caught. (pure python, no GPU/API)")
+    print(
+        "SELFTEST PASS: anchor/check, append-only growth, rewrite-after-anchor caught, "
+        "C2SP refuse-inconsistent, truncation caught. (pure python, no GPU/API)"
+    )
     return 0
 
 
