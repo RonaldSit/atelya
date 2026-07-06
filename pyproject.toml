@@ -38,3 +38,6 @@ atelya-govern = "amem_governance:main"
 
 [tool.setuptools]
 py-modules = ["amem_attest", "amem_anchor", "amem_governance"]
+
+[tool.ruff]
+line-length = 100
