@@ -409,7 +409,10 @@ def main(argv=None):
     elif args.cmd == "erase":
         if not args.match:
             sys.exit("--match <regex> required")
-        r = erase(args.oplog, args.match, hard=args.hard)
+        try:
+            r = erase(args.oplog, args.match, hard=args.hard)
+        except re.error as e:
+            sys.exit(f"invalid --match regex: {e}")
         print(json.dumps(r, ensure_ascii=False))
         print(
             f"  {'HARD PURGE (content removed)' if args.hard else 'SOFT forget (auditable; text retained in log)'}"

@@ -281,3 +281,9 @@ def test_cli_attest_verify_roundtrip_and_tamper_exit(logfile, tmp_path, capsys):
 def test_module_selftest_passes(capsys):
     assert gov._selftest() == 0
     assert "SELFTEST PASS" in capsys.readouterr().out
+
+
+def test_cli_erase_rejects_invalid_regex(logfile):
+    with pytest.raises(SystemExit) as e:
+        gov.main(["erase", logfile, "--match", "["])
+    assert "invalid --match regex" in str(e.value)
