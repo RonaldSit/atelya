@@ -48,7 +48,7 @@ printf '%s\n' \
 
 python3 amem_governance.py attest sample_oplog.jsonl --out chain.jsonl   # prints ROOT
 python3 amem_governance.py verify-chain chain.jsonl                      # VERIFIED
-sed -i 's/penicillin/aspirin/' chain.jsonl                               # attacker edits history
+python3 -c "import pathlib as pl; p=pl.Path('chain.jsonl'); p.write_text(p.read_text().replace('penicillin','aspirin'))"   # attacker edits history
 python3 amem_governance.py verify-chain chain.jsonl                      # TAMPER DETECTED at seq=0 (exit 1)
 ```
 
@@ -86,7 +86,7 @@ python3 amem_attest.py attest sample_oplog.jsonl --out chain.jsonl
 python3 amem_anchor.py anchor chain.jsonl --ledger /separate-control/anchors.jsonl
 
 # attacker rewrites the op-log AND re-attests:
-sed -i 's/penicillin/aspirin/' sample_oplog.jsonl
+python3 -c "import pathlib as pl; p=pl.Path('sample_oplog.jsonl'); p.write_text(p.read_text().replace('penicillin','aspirin'))"
 python3 amem_attest.py attest sample_oplog.jsonl --out chain.jsonl
 
 python3 amem_attest.py verify chain.jsonl        # ✅ VERIFIED — the chain alone is blind

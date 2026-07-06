@@ -1,5 +1,8 @@
-__pycache__/
+*.egg-info/
 .pytest_cache/
-sample_oplog.jsonl
-chain.jsonl
+__pycache__/
 anchors.jsonl
+build/
+chain.jsonl
+dist/
+sample_oplog.jsonl
