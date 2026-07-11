@@ -197,9 +197,9 @@ def test_erase_hard_removes_content_logs_purge_and_resurrects_predecessor(logfil
     purge = evs[-1]
     assert purge["op"] == "purge" and purge["id"] == "b"
     assert purge["note"] == "content removed for compliance"  # the purge itself is logged
-    # honest note: the marker's reason records the erasure *pattern* verbatim — erase by
-    # label/id-pattern, not by pasting the literal secret (0.2: consider hashing it)
-    assert purge["reason"] == "erasure:/Airbus/"
+    # the marker's reason is a SHA-256 digest of the pattern — verifiable, never leaks it
+    import hashlib as _h
+    assert purge["reason"] == "erasure:sha256:" + _h.sha256(b"Airbus").hexdigest()
     assert not any(e.get("op") == "flag" for e in evs)  # erase-hard drops referencing flags
     rec, _ = gov.replay(evs)
     assert "b" not in rec  # purge marker alone creates no record

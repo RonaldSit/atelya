@@ -40,6 +40,7 @@ root externally (WORM/notary) for full assurance.
 
 import argparse
 import csv
+import hashlib
 import json
 import os
 import re
@@ -229,7 +230,7 @@ def erase(path, pattern, hard=False):
             {
                 "op": "purge",
                 "id": rid,
-                "reason": f"erasure:/{pattern}/",
+                "reason": "erasure:sha256:" + hashlib.sha256(pattern.encode()).hexdigest(),
                 "created_at": time.time(),
                 "note": "content removed for compliance",
             }

@@ -73,7 +73,12 @@ def read_jsonl(path):
 
 
 def build_chain(events, key: bytes | None):
-    """Wrap each op-log event into a hash-chained attestation entry."""
+    """Wrap each op-log event into a hash-chained attestation entry.
+
+    Note: the ``key`` argument is the optional HMAC secret (bytes). It is
+    unrelated to the per-event ``"key"`` field, which names the memory slot
+    used for supersede semantics.
+    """
     chain, prev = [], GENESIS
     for seq, ev in enumerate(events):
         ts = ev.get("created_at")

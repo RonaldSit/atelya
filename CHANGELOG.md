@@ -37,6 +37,9 @@ Staged as **0.1.1** (version bumped in `pyproject.toml`; not yet on PyPI).
   structure instead of a local-year prefix; previously failed on UTC−4).
 
 ### Security
+- Hard-purge markers record the erasure pattern as a **SHA-256 digest**
+  (`erasure:sha256:<hex>`) instead of verbatim — erasing by a literal secret no
+  longer re-embeds it in the audit trail (D6).
 - Key loaders now refuse empty keys from `--key`, keyfiles, or env vars instead of
   silently downgrading HMAC to plain SHA-256; inline key flags emit a stderr warning
   (visible in `ps`/shell history — prefer keyfile or env). (CodeRabbit R1)
