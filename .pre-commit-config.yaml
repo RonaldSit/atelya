@@ -1,0 +1,21 @@
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-format
+        name: ruff format
+        language: python
+        additional_dependencies: ["ruff==0.15.20"]
+        entry: ruff format
+        types_or: [python, pyi]
+      - id: ruff-check
+        name: ruff check (incl. incident fences B/DTZ/TID252/T100)
+        language: python
+        additional_dependencies: ["ruff==0.15.20"]
+        entry: ruff check
+        types_or: [python, pyi]
+      - id: compileall
+        name: python compileall
+        language: system
+        entry: python3 -m compileall -q amem_attest.py amem_anchor.py amem_governance.py tests
+        pass_filenames: false
+        files: '\.py$'

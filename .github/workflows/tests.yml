@@ -36,3 +36,18 @@ jobs:
       - name: Lint
         run: ruff check .
 
+  cli-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install package
+        run: pip install -e .
+      - name: Every CLI answers --help fast (stdin closed, timed)
+        run: |
+          for b in atelya-attest atelya-anchor atelya-govern; do
+            timeout 10 "$b" --help </dev/null >/dev/null
+          done
+
