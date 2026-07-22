@@ -335,9 +335,15 @@ def test_require_anchor_flag(paths):
         root="a" * 64,
         key=None,
     )
-    write_ledger([other], ledger_p)
+    # (a) nothing anchored at all -> warn only; --require-anchor turns it into a CI gate
+    write_ledger([], ledger_p)
     assert anchor.main(["check", chain_p, "--ledger", ledger_p]) == 0  # warn only
     assert anchor.main(["check", chain_p, "--ledger", ledger_p, "--require-anchor"]) == 1  # CI gate
+    # (b) the ledger DOES hold checkpoints, just under another label: a forgotten --label
+    # must never silently pass for a security tool -> fail loudly, listing what exists
+    write_ledger([other], ledger_p)
+    assert anchor.main(["check", chain_p, "--ledger", ledger_p]) == 1
+    assert anchor.main(["check", chain_p, "--ledger", ledger_p, "--label", "some-other-chain"]) != 0
 
 
 def test_empty_chain_checkpoint(paths):

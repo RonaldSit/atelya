@@ -298,3 +298,25 @@ def test_key_loaders_reject_whitespace_only_inline():
     anchor = _load("amem_anchor")
     with pytest.raises(SystemExit):
         anchor._load_key("   ", None, "AMEM_ANCHOR_KEY")
+
+
+def test_anchor_check_forgotten_label_fails_loudly(tmp_path):
+    import contextlib
+    import io
+
+    anchor = _load("amem_anchor")
+    log = tmp_path / "l.jsonl"
+    log.write_text('{"op":"add","id":"m1","text":"secret","created_at":1.0}\n')
+    ch = tmp_path / "ch.jsonl"
+    led = tmp_path / "led.jsonl"
+    with contextlib.redirect_stdout(io.StringIO()):
+        attest.main(["attest", str(log), "--out", str(ch)])
+        anchor.main(["anchor", str(ch), "--ledger", str(led), "--label", "demo"])
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = anchor.main(["check", str(ch), "--ledger", str(led)])  # forgot --label
+    assert rc == 1 and "demo" in buf.getvalue()
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = anchor.main(["check", str(ch), "--ledger", str(led), "--label", "demo"])
+    assert rc == 0 and "VERIFIED" in buf.getvalue()

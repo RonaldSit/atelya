@@ -4,9 +4,7 @@ All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) ·
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
-Staged as **0.1.1** (version bumped in `pyproject.toml`; not yet on PyPI).
+## [0.1.1] — 2026-07-16
 
 ### Added
 - `tests/test_amem_governance.py`: 22-case suite covering replay/supersede,
@@ -14,7 +12,7 @@ Staged as **0.1.1** (version bumped in `pyproject.toml`; not yet on PyPI).
   `reason` records the erasure *pattern* verbatim — erase by label, not by
   pasting the literal secret), retention by age and by active-cap
   (oldest-first), audit timeline/export, lineage, conflict winners, CLI guard
-  exits, and an attest → verify-chain → tamper round-trip. Total suite: **60**.
+  exits, and an attest → verify-chain → tamper round-trip. Total suite: **63**.
 - `SECURITY.md` (private vulnerability reporting) and this `CHANGELOG.md`.
 - CI: `ruff format --check` + `ruff check` lint job alongside the
   Python 3.10–3.13 test matrix.
@@ -32,6 +30,9 @@ Staged as **0.1.1** (version bumped in `pyproject.toml`; not yet on PyPI).
   `sed -i` form breaks on macOS/BSD sed).
 
 ### Fixed
+- `atelya-anchor check` no longer silently passes when `--label` is forgotten
+  but the ledger holds anchors under other labels — it lists them and fails
+  (found by the user walkthrough).
 - Dead temp-dir allocation removed from the attest self-test.
 - Governance timeline test made timezone-hermetic (asserted timestamp
   structure instead of a local-year prefix; previously failed on UTC−4).
@@ -40,7 +41,7 @@ Staged as **0.1.1** (version bumped in `pyproject.toml`; not yet on PyPI).
 - Hard-purge markers record the erasure pattern as a **SHA-256 digest**
   (`erasure:sha256:<hex>`) instead of verbatim — erasing by a literal secret no
   longer re-embeds it in the audit trail (D6).
-- Key loaders now refuse empty keys from `--key`, keyfiles, or env vars instead of
+- Key loaders now refuse empty/whitespace-only keys from `--key`, keyfiles, or env vars instead of
   silently downgrading HMAC to plain SHA-256; inline key flags emit a stderr warning
   (visible in `ps`/shell history — prefer keyfile or env). (CodeRabbit R1)
 

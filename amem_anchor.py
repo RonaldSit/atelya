@@ -285,6 +285,14 @@ def cmd_check(chain_path, ledger_path, label, akey, ckey, require_anchor):
 
     cps = [e for e in ledger if e.get("label") == label]
     if not cps:
+        other = sorted({e.get("label") for e in ledger if e.get("label")})
+        if other:
+            print(
+                f"FAIL — no checkpoints for label '{label}', but the ledger holds labels {other}. "
+                f"Pass --label <one of these>. (check defaults --label to the chain filename, so a "
+                f"forgotten --label must not silently pass for a security tool.)"
+            )
+            return 1
         msg = f"no checkpoints found for label '{label}' — nothing anchored yet"
         if require_anchor:
             print(f"FAIL — {msg} (--require-anchor)")
