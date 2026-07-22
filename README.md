@@ -20,7 +20,7 @@ attack a plain hash chain cannot see: an insider who tampers **and re-chains**.
 - 🧾 **Governance CLI** — audit timeline, per-memory lineage, GDPR-correct
   erasure (soft-forget vs hard-purge, and the purge itself is a chained event)
 - 🪶 **Zero dependencies** — Python 3.10+ standard library only, ~3 small files
-- ✅ **60 tests** — known-answer vectors, stdlib-only independent verifiers,
+- ✅ **63 tests** — known-answer vectors, stdlib-only independent verifiers,
   adversarial suite (rewrite-and-rechain, truncation, ledger tampering, …)
 
 ## Install
@@ -30,7 +30,7 @@ git clone https://github.com/RonaldSit/atelya.git
 cd atelya
 ```
 
-Or from PyPI (installs the latest published release, currently **0.1.0**; this repo is 0.1.1-staged — see CHANGELOG):
+Or from PyPI — **0.1.1**, which also installs the console commands `atelya-attest` / `atelya-anchor` / `atelya-govern`:
 
 ```bash
 pip install atelya-attest
@@ -117,7 +117,9 @@ verifier), threat model, and auditor runbook: **[ATTESTATION.md](ATTESTATION.md)
 
 If your agents touch regulated workflows (health, finance, hiring, legal), EU
 AI Act **Article 12** — automatic, verifiable event logging for high-risk
-systems — becomes enforceable **August 2, 2026**. This layer produces the
+systems — is coming with runway: the Digital Omnibus moved standalone
+high-risk (Annex III) duties to **2 December 2027**, while GDPR erasure is
+enforceable **today** (dates verified 2026-07). This layer produces the
 evidence trail those audits ask for; the sources and control mapping
 (EU AI Act / SOC 2 / NIST SP 800-92) live in [ATTESTATION.md](ATTESTATION.md).
 
@@ -147,14 +149,18 @@ witness-order conflicts.
 ## About Atelya OS
 
 This repo is the **open audit layer** of Atelya OS. The memory **engine** —
-closed-API orchestration measured at ~90% memory-token savings on real API
-runs, and KV-native serving for self-hosted inference — is not published here.
-We're onboarding **3 design partners** ahead of the August 2 deadline:
+closed-API orchestration and KV-native serving — is not published here.
+Measured on our own bills, not extrapolated: **2026-07-08** memory tokens
+**−76.8%** at turn 12 (**−84.5%** final turn); full-system *including* the
+extraction tax **+33.5%**, which **missed our own pre-registered line by
+1.5 points — published as measured**. **2026-07-11** self-hosted KV reuse:
+**6.12× cheaper prefill** at **96%** per-query agreement (RTX 4070, n=200).
+We're onboarding **3 design partners**:
 **[open an issue](https://github.com/RonaldSit/atelya/issues)** to talk.
 
 ## Roadmap
 
-- [ ] PyPI package (`pip install atelya-attest`)
+- [x] PyPI package (`pip install atelya-attest`) — **0.1.1 published**
 - [ ] Anchor backends: S3 Object Lock (WORM) & RFC 3161 timestamp helper
 - [ ] `examples/` — FastAPI middleware & nightly-verify cron recipes
 - [ ] GitHub Action wrapping `--require-anchor` as a release gate

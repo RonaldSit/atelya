@@ -9,8 +9,8 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 ### Added
 - `tests/test_amem_governance.py`: 22-case suite covering replay/supersede,
   GDPR **soft-forget vs hard-purge** (purge itself logged; the marker's
-  `reason` records the erasure *pattern* verbatim — erase by label, not by
-  pasting the literal secret), retention by age and by active-cap
+  `reason` records a **SHA-256 digest** of the erasure pattern — verifiable
+  without ever leaking it), retention by age and by active-cap
   (oldest-first), audit timeline/export, lineage, conflict winners, CLI guard
   exits, and an attest → verify-chain → tamper round-trip. Total suite: **63**.
 - `SECURITY.md` (private vulnerability reporting) and this `CHANGELOG.md`.
