@@ -64,6 +64,42 @@ atelya-govern verify-chain chain.jsonl
 - Everything is line-oriented JSON on disk. No database, no daemon, no
   network, no dependencies.
 
+## Use it from Python
+
+```python
+from amem_attest import build_chain, verify_chain, root_of
+
+events = [{"op": "add", "id": "m1", "text": "patient allergic to penicillin"}]
+chain = build_chain(events, key=None)        # key=b"..." switches to HMAC-SHA256
+print(root_of(chain))                        # the commitment you anchor / publish
+ok, bad_seq, reason = verify_chain(chain, key=None)
+```
+
+Mutate any field of any entry and `verify_chain` returns `(False, <seq>, <why>)`
+— sequence gaps, broken links, and payload edits are all distinguished.
+
+## The attack a chain alone cannot catch
+
+An attacker with write access can tamper **and rebuild the whole chain** — the
+file then verifies internally. The transparency-log answer: checkpoint the head
+into a ledger the writer cannot touch, then check consistency later.
+
+```bash
+atelya-attest attest log.jsonl --out chain.jsonl
+atelya-anchor anchor chain.jsonl --ledger /separate-control/anchors.jsonl --label prod
+
+# attacker rewrites the op-log AND re-attests the whole chain:
+python3 -c "import pathlib as p; f=p.Path('log.jsonl'); f.write_text(f.read_text().replace('penicillin','aspirin'))"
+atelya-attest attest log.jsonl --out chain.jsonl
+
+atelya-attest verify chain.jsonl                 # ✅ VERIFIED — the chain alone is blind
+atelya-anchor check chain.jsonl --ledger /separate-control/anchors.jsonl --label prod
+# ❌ ANCHOR CONFLICT … history rewritten (same-position different-root) — exit 1
+```
+
+Run the ledger under **separate control** (different account/host/WORM store);
+separation of duties is what turns "detects accidents" into "detects insiders".
+
 ## Guarantees — and non-guarantees
 
 - **Tamper-EVIDENT, not tamper-proof.** Anyone claiming tamper-proof is
