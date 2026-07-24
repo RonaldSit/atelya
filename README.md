@@ -42,7 +42,7 @@ atelya-govern verify-chain chain.jsonl
 | GDPR erasure | `atelya-govern erase [--hard]` | soft = auditable forget (text retained); hard = content gone, marker records only a **SHA-256 digest** of the pattern — the erasure is provable, the secret never leaks |
 | Audit views | `audit / lineage / conflicts / summary` | full timeline, one record's life, flagged contradictions |
 | Retention | `retention --max-age / --max-active` | age/cap-based retirement, logged like everything else |
-| Auditor export | `audit --out report.json|.csv` | machine-readable evidence for compliance packs |
+| Auditor export | `audit --out report.json` (or `.csv`) | machine-readable evidence for compliance packs |
 | Self-tests | `--selftest` on all three tools | known-answer vectors, runnable anywhere, offline |
 
 ## How it works
