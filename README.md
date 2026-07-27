@@ -124,16 +124,19 @@ We pre-register benchmark pass lines and **publish the misses** — see
 [CHANGELOG.md](CHANGELOG.md). The most recent full-system billing run missed
 our own bar by 1.5 points; it's in there, dated.
 
-## Where this sits (honest positioning)
+## Where this fits
 
-| | Memory frameworks (Mem0, Zep, Letta, …) | AI action-audit tools | **Atelya Attest** |
-|---|---|---|---|
-| What they chain | nothing (memory is mutable state) | what the agent **did** | what the agent **remembers** — the memory-state lifecycle |
-| GDPR erase evidence | ✗ | ✗ | soft/hard with sha256 markers |
-| Works with your existing memory | — | n/a | **yes** — any system that can emit a one-event-per-line JSONL log |
+Atelya Attest is a **bolt-on evidence layer, not a memory store** — there is
+nothing to migrate. If your memory system can emit one JSON event per line
+(add / supersede / forget / erase), you get:
 
-No performance comparisons here on purpose: run your own eval. This layer
-bolts onto whatever memory you already run.
+- a hash chain over that lifecycle, committed by a single ROOT
+- pinpoint verification — `TAMPER DETECTED at seq=N`, exit 1, CI-ready
+- external anchoring that catches whole-history rewrites
+- GDPR soft-forget / hard-purge with sha256-digest markers
+- auditor exports (JSON / CSV) and three offline `--selftest`s
+
+Deliberately no performance comparisons: run your own eval, on your own data.
 
 ## Why now
 
@@ -149,7 +152,7 @@ evidence trail those audits ask for; sources and control mapping
 **Is this "tamper-proof"?** No — tamper-evident, plus external anchoring
 against rewrite-and-rechain. See *Guarantees* above.
 
-**We already run Mem0 / Zep / our own memory.** Keep it. If it can emit
+**We already have a memory stack.** Keep it. If it can emit
 JSONL events, the attest layer bolts on today — three commands, zero
 dependencies, nothing replaced.
 
