@@ -14,9 +14,15 @@ witness ledger, and GDPR erasure leaves a verifiable marker instead of a
 silent hole. Pure Python stdlib — your auditor can rewrite the verifier in an
 afternoon.
 
+**[atelyaos.com](https://atelyaos.com)** — live tamper demo, dated
+benchmarks, and the engine side of the project.
+
 ```bash
 pip install atelya-attest
 ```
+
+No install is required either: the tools are stdlib-only and run straight from
+a clone (`python3 amem_attest.py --help`).
 
 ## 60-second proof
 
@@ -141,7 +147,7 @@ Deliberately no performance comparisons: run your own eval, on your own data.
 ## Why now
 
 The EU AI Act's logging/record-keeping duty (Art. 12) for high-risk AI
-systems — is coming with runway: the Digital Omnibus moved standalone
+systems is coming with runway: the Digital Omnibus moved standalone
 high-risk (Annex III) duties to **2 December 2027**, while GDPR erasure is
 enforceable **today** (dates verified 2026-07). This layer produces the
 evidence trail those audits ask for; sources and control mapping
@@ -164,7 +170,7 @@ roadmap; verifiability ships now.
 ## About Atelya OS
 
 Atelya Attest is the open, self-verifiable layer of a larger system. The
-engine — semantic memory with same-key supersede, a drop-in
+engine — semantic memory with same-key supersede, drop-in
 closed-API orchestration and KV-native serving — is
 not published here. Measured on our own bills, not extrapolated:
 **2026-07-08** memory tokens **−76.8%** at turn 12 (**−84.5%** final turn);
