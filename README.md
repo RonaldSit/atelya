@@ -70,6 +70,10 @@ atelya-govern verify-chain chain.jsonl
 - Everything is line-oriented JSON on disk. No database, no daemon, no
   network, no dependencies.
 
+**Auditors:** [ATTESTATION.md](ATTESTATION.md) gives the exact hash construction
+(precise enough to write your own verifier), a threat model per adversary
+capability, the regulatory control mapping, and a copy-paste runbook.
+
 ## Use it from Python
 
 ```python
