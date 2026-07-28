@@ -92,6 +92,9 @@ complete the picture.
 ## 5. Auditor runbook (copy-paste)
 
 ```bash
+# 0) Installed from PyPI? Substitute the console commands throughout:
+#    atelya-govern / atelya-attest / atelya-anchor  ==  python3 <file>.py
+
 # 1) Build the chain over a memory op-log (per-user JSONL file)
 python3 amem_governance.py attest data/<user>.jsonl --out data/<user>.attest.jsonl
 #    -> prints the ROOT COMMITMENT. Record/anchor it externally.
