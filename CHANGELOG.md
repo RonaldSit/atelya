@@ -4,6 +4,15 @@ All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) ·
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- Readability refactor: cryptic locals renamed (`ev`→`event`, `cp`→`checkpoint`,
+  `ch`→`chain_head`, `r`→`record`, `rx`→`regex`, `st`→`status`, `ap`→`parser`),
+  the dead `OPS_WRITE` constant removed, and one implicit `return None` made an
+  explicit `return 0`. No behaviour change — selftests, the 63-test suite and the
+  hard-erase marker digest are identical before and after. Not yet on PyPI.
+
 ## [0.1.1] — 2026-07-16
 
 ### Added
