@@ -80,8 +80,8 @@ def build_chain(events, key: bytes | None):
     used for supersede semantics.
     """
     chain, prev = [], GENESIS
-    for seq, ev in enumerate(events):
-        ts = ev.get("created_at")
+    for seq, event in enumerate(events):
+        ts = event.get("created_at")
         rfc3339 = (
             time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
             if isinstance(ts, (int, float))
@@ -89,10 +89,10 @@ def build_chain(events, key: bytes | None):
         )
         entry = {
             "seq": seq,
-            "event_id": ev.get("id")
-            or f"evt-{uuid.uuid5(uuid.NAMESPACE_OID, str(seq) + canonical(ev).decode())}",
+            "event_id": event.get("id")
+            or f"evt-{uuid.uuid5(uuid.NAMESPACE_OID, str(seq) + canonical(event).decode())}",
             "ts": rfc3339,
-            "payload": ev,  # the original op-log event, verbatim
+            "payload": event,  # the original op-log event, verbatim
             "prev_hash": prev,
         }
         entry["curr_hash"] = digest(prev, _payload_for_hash(entry), key)
@@ -150,16 +150,16 @@ def _load_key(args):
 def main(argv=None):
     if hasattr(signal, "SIGPIPE"):  # standard CLI: exit quietly (141) when piped to head/less
         signal.signal(signal.SIGPIPE, signal.SIG_DFL)
-    ap = argparse.ArgumentParser(
+    parser = argparse.ArgumentParser(
         description="tamper-evident hash-chained attestation for amem op-log"
     )
-    ap.add_argument("cmd", nargs="?", choices=["attest", "verify", "root"])
-    ap.add_argument("path", nargs="?")
-    ap.add_argument("--out")
-    ap.add_argument("--key")
-    ap.add_argument("--keyfile")
-    ap.add_argument("--selftest", action="store_true")
-    args = ap.parse_args(argv)
+    parser.add_argument("cmd", nargs="?", choices=["attest", "verify", "root"])
+    parser.add_argument("path", nargs="?")
+    parser.add_argument("--out")
+    parser.add_argument("--key")
+    parser.add_argument("--keyfile")
+    parser.add_argument("--selftest", action="store_true")
+    args = parser.parse_args(argv)
 
     if args.selftest:
         return _selftest()

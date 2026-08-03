@@ -48,8 +48,6 @@ import sys
 import time
 import signal
 
-OPS_WRITE = {"add", "update"}  # events that carry/define content
-
 
 def read_log(path):
     out = []
@@ -85,10 +83,10 @@ def replay(events):
         rid = ev.get("id")
         if op == "add":
             if rid and ev.get("key") is not None:
-                for r in rec.values():  # same-key supersede (the lifecycle)
-                    if r["status"] == "active" and r.get("key") == ev.get("key"):
-                        r["status"] = "superseded"
-                        r["history"].append("superseded-by-" + str(rid))
+                for record in rec.values():  # same-key supersede (the lifecycle)
+                    if record["status"] == "active" and record.get("key") == ev.get("key"):
+                        record["status"] = "superseded"
+                        record["history"].append("superseded-by-" + str(rid))
             if rid is None:
                 rid = f"_auto{len(order)}"
             rec[rid] = {
@@ -192,9 +190,9 @@ def conflicts(events):
 
 
 def _match_ids(events, pattern):
-    rx = re.compile(pattern, re.I)
+    regex = re.compile(pattern, re.I)
     rec, _ = replay(events)
-    return [rid for rid, r in rec.items() if rx.search(r.get("text") or "")]
+    return [rid for rid, record in rec.items() if regex.search(record.get("text") or "")]
 
 
 def erase(path, pattern, hard=False):
@@ -252,8 +250,8 @@ def retention(path, max_age_days=None, max_active=None, hard=False):
         cut = now - max_age_days * 86400
         doomed += [
             rid
-            for rid, r in rec.items()
-            if r["status"] == "active" and (r.get("created_at") or now) < cut
+            for rid, record in rec.items()
+            if record["status"] == "active" and (record.get("created_at") or now) < cut
         ]
     if max_active is not None:
         active = [rid for rid in order if rec[rid]["status"] == "active"]
@@ -285,14 +283,14 @@ def retention(path, max_age_days=None, max_active=None, hard=False):
 
 def summary(events):
     rec, _ = replay(events)
-    st = {}
-    for r in rec.values():
-        st[r["status"]] = st.get(r["status"], 0) + 1
+    status = {}
+    for record in rec.values():
+        status[record["status"]] = status.get(record["status"], 0) + 1
     nflag = sum(1 for ev in events if ev.get("op") == "flag")
     return {
         "events": len(events),
         "memories": len(rec),
-        "by_status": st,
+        "by_status": status,
         "contradiction_flags": nflag,
         "auditable": "every add/update/supersede/forget is logged with a timestamp",
         "actor_tracking": "present"
@@ -304,9 +302,9 @@ def summary(events):
 # ---------------- CLI ----------------
 def _print_rows(rows, n=40):
     print(f"{'seq':>4} {'time':<19} {'op':<11} {'id':<10} {'detail'}")
-    for r in rows[:n]:
+    for record in rows[:n]:
         print(
-            f"{r['seq']:>4} {r['time']:<19} {r['op']:<11} {str(r['id'])[:10]:<10} {r['detail'][:70]}"
+            f"{record['seq']:>4} {record['time']:<19} {record['op']:<11} {str(record['id'])[:10]:<10} {record['detail'][:70]}"
         )
     if len(rows) > n:
         print(f"... (+{len(rows) - n} more; use --out to export full)")
@@ -315,8 +313,8 @@ def _print_rows(rows, n=40):
 def main(argv=None):
     if hasattr(signal, "SIGPIPE"):  # standard CLI: exit quietly (141) when piped to head/less
         signal.signal(signal.SIGPIPE, signal.SIG_DFL)
-    ap = argparse.ArgumentParser()
-    ap.add_argument(
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
         "cmd",
         nargs="?",
         choices=[
@@ -330,17 +328,17 @@ def main(argv=None):
             "verify-chain",
         ],
     )
-    ap.add_argument("oplog", nargs="?")
-    ap.add_argument("--id")
-    ap.add_argument("--match")
-    ap.add_argument("--out")
-    ap.add_argument("--hard", action="store_true")
-    ap.add_argument("--max-age-days", type=float)
-    ap.add_argument("--max-active", type=int)
-    ap.add_argument("--key")
-    ap.add_argument("--keyfile")
-    ap.add_argument("--selftest", action="store_true")
-    args = ap.parse_args(argv)
+    parser.add_argument("oplog", nargs="?")
+    parser.add_argument("--id")
+    parser.add_argument("--match")
+    parser.add_argument("--out")
+    parser.add_argument("--hard", action="store_true")
+    parser.add_argument("--max-age-days", type=float)
+    parser.add_argument("--max-active", type=int)
+    parser.add_argument("--key")
+    parser.add_argument("--keyfile")
+    parser.add_argument("--selftest", action="store_true")
+    args = parser.parse_args(argv)
 
     if args.selftest:
         return _selftest()
@@ -382,7 +380,7 @@ def main(argv=None):
                 print(f"VERIFIED — {reason}")
             else:
                 sys.exit(f"TAMPER DETECTED at seq={bad}: {reason}")
-        return
+        return 0
 
     if args.cmd == "audit":
         rows = audit_timeline(events)
@@ -411,16 +409,16 @@ def main(argv=None):
         if not args.match:
             sys.exit("--match <regex> required")
         try:
-            r = erase(args.oplog, args.match, hard=args.hard)
+            record = erase(args.oplog, args.match, hard=args.hard)
         except re.error as e:
             sys.exit(f"invalid --match regex: {e}")
-        print(json.dumps(r, ensure_ascii=False))
+        print(json.dumps(record, ensure_ascii=False))
         print(
             f"  {'HARD PURGE (content removed)' if args.hard else 'SOFT forget (auditable; text retained in log)'}"
         )
     elif args.cmd == "retention":
-        r = retention(args.oplog, args.max_age_days, args.max_active, hard=args.hard)
-        print(json.dumps(r, ensure_ascii=False))
+        record = retention(args.oplog, args.max_age_days, args.max_active, hard=args.hard)
+        print(json.dumps(record, ensure_ascii=False))
     return 0
 
 
@@ -483,23 +481,23 @@ def _selftest():
     assert any(op == "add" for _, op, _ in lin), "lineage has birth"
 
     # GDPR soft erase: SSN forgotten but text retained in the log (auditable)
-    r = erase(p, "SSN", hard=False)
-    assert r["matched"] == 1 and r["mode"] == "soft", r
+    record = erase(p, "SSN", hard=False)
+    assert record["matched"] == 1 and record["mode"] == "soft", record
     assert any("SSN" in (e.get("text") or "") for e in read_log(p)), "soft: text retained for audit"
     rec2, _ = replay(read_log(p))
     assert rec2["c"]["status"] == "deleted", "soft: status deleted"
 
     # GDPR hard purge: SSN content removed from the log entirely
-    r = erase(p, "SSN", hard=True)
-    assert r["mode"] == "hard", r
+    record = erase(p, "SSN", hard=True)
+    assert record["mode"] == "hard", record
     assert not any("123-45-6789" in (e.get("text") or "") for e in read_log(p)), (
         "hard: content gone"
     )
     assert any(e.get("op") == "purge" for e in read_log(p)), "hard: purge action logged"
 
     # retention by age: the 100-day-old active record(s) retired
-    r = retention(p, max_age_days=30, hard=False)
-    assert r["retired"] >= 1, r
+    record = retention(p, max_age_days=30, hard=False)
+    assert record["retired"] >= 1, record
 
     # integration: attest the op-log, verify passes; mutate one byte, verify fails
     try:

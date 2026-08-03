@@ -125,13 +125,13 @@ def chain_head(chain):
     return chain[-1]["seq"], len(chain), chain[-1]["curr_hash"]
 
 
-def consistency(chain, cp):
+def consistency(chain, checkpoint):
     """Is the CURRENT chain an append-only superset of this checkpoint?
     (RFC 6962 consistency, linear-chain form.) Returns (ok, reason)."""
-    n = cp.get("n_entries", 0)
+    n = checkpoint.get("n_entries", 0)
     if n == 0:
         return True, "empty checkpoint (consistent with any chain)"
-    seq = cp.get("seq")
+    seq = checkpoint.get("seq")
     if seq is None or seq != n - 1:
         return False, "malformed checkpoint (seq/n_entries mismatch)"
     if len(chain) <= seq:
@@ -139,7 +139,7 @@ def consistency(chain, cp):
             f"chain has {len(chain)} entries but checkpoint anchors seq={seq}"
             " — history truncated/vanished below an anchored checkpoint"
         )
-    if chain[seq].get("curr_hash") != cp.get("root"):
+    if chain[seq].get("curr_hash") != checkpoint.get("root"):
         return False, (
             f"chain hash at seq={seq} != anchored root"
             " — history rewritten (same-position different-root conflict)"
@@ -151,8 +151,8 @@ def monotonic(cps):
     """C2SP-witness ordering over a label's checkpoints: seq never decreases;
     equal seq must carry an equal root. Returns (ok, index, reason)."""
     last_seq, last_root, seen = None, None, False
-    for i, cp in enumerate(cps):
-        seq = -1 if cp.get("seq") is None else cp["seq"]
+    for i, checkpoint in enumerate(cps):
+        seq = -1 if checkpoint.get("seq") is None else checkpoint["seq"]
         if seen:
             if seq < last_seq:
                 return (
@@ -160,13 +160,13 @@ def monotonic(cps):
                     i,
                     f"checkpoint seq decreased ({last_seq} -> {seq}) — witness-order violation",
                 )
-            if seq == last_seq and cp.get("root") != last_root:
+            if seq == last_seq and checkpoint.get("root") != last_root:
                 return (
                     False,
                     i,
                     "same anchored position with a different root — conflict (C2SP 409 analogue)",
                 )
-        last_seq, last_root, seen = seq, cp.get("root"), True
+        last_seq, last_root, seen = seq, checkpoint.get("root"), True
     return True, None, "monotonic"
 
 
@@ -239,12 +239,12 @@ def cmd_anchor(chain_path, ledger_path, label, akey, ckey, at):
         )
         return 2
     # C2SP tlog-checkpoint: MUST not sign a checkpoint inconsistent with any prior one.
-    for i, cp in enumerate(cps):
-        ok, reason = consistency(chain, cp)
+    for i, checkpoint in enumerate(cps):
+        ok, reason = consistency(chain, checkpoint)
         if not ok:
             print(
                 f"REFUSED — chain is inconsistent with previously anchored checkpoint #{i} "
-                f"(anchored_at {cp.get('anchored_at')}): {reason}"
+                f"(anchored_at {checkpoint.get('anchored_at')}): {reason}"
             )
             print(
                 "  (C2SP tlog-checkpoint rule: a log MUST NOT sign a checkpoint "
@@ -308,12 +308,12 @@ def cmd_check(chain_path, ledger_path, label, akey, ckey, require_anchor):
     if not ok:
         print(f"FAIL — checkpoint order for '{label}' at #{bad}: {reason}")
         return 1
-    for i, cp in enumerate(cps):
-        ok, reason = consistency(chain, cp)
+    for i, checkpoint in enumerate(cps):
+        ok, reason = consistency(chain, checkpoint)
         if not ok:
             print(
                 f"FAIL — ANCHOR CONFLICT vs checkpoint #{i} "
-                f"(anchored_at {cp.get('anchored_at')}, seq={cp.get('seq')}): {reason}"
+                f"(anchored_at {checkpoint.get('anchored_at')}, seq={checkpoint.get('seq')}): {reason}"
             )
             return 1
     last = cps[-1]
@@ -360,21 +360,21 @@ def cmd_latest(ledger_path, label, akey):
 def main(argv=None):
     if hasattr(signal, "SIGPIPE"):  # standard CLI: exit quietly (141) when piped to head/less
         signal.signal(signal.SIGPIPE, signal.SIG_DFL)
-    ap = argparse.ArgumentParser(
+    parser = argparse.ArgumentParser(
         description="external checkpoint/witness ledger for amem attest chains"
     )
-    ap.add_argument("cmd", nargs="?", choices=["anchor", "check", "latest"])
-    ap.add_argument("chain", nargs="?")
-    ap.add_argument("--ledger")
-    ap.add_argument("--label")
-    ap.add_argument("--key")
-    ap.add_argument("--keyfile")
-    ap.add_argument("--chain-key", dest="chain_key")
-    ap.add_argument("--chain-keyfile", dest="chain_keyfile")
-    ap.add_argument("--at")
-    ap.add_argument("--require-anchor", action="store_true")
-    ap.add_argument("--selftest", action="store_true")
-    args = ap.parse_args(argv)
+    parser.add_argument("cmd", nargs="?", choices=["anchor", "check", "latest"])
+    parser.add_argument("chain", nargs="?")
+    parser.add_argument("--ledger")
+    parser.add_argument("--label")
+    parser.add_argument("--key")
+    parser.add_argument("--keyfile")
+    parser.add_argument("--chain-key", dest="chain_key")
+    parser.add_argument("--chain-keyfile", dest="chain_keyfile")
+    parser.add_argument("--at")
+    parser.add_argument("--require-anchor", action="store_true")
+    parser.add_argument("--selftest", action="store_true")
+    args = parser.parse_args(argv)
 
     if args.selftest:
         return _selftest()
@@ -422,9 +422,9 @@ def _selftest():
     chain_p, ledger_p = os.path.join(d, "c.jsonl"), os.path.join(d, "anchors.jsonl")
 
     def write_chain(events):
-        ch = attest.build_chain(events, None)
+        chain_head = attest.build_chain(events, None)
         with open(chain_p, "w", encoding="utf-8") as f:
-            for e in ch:
+            for e in chain_head:
                 f.write(json.dumps(e, ensure_ascii=False) + "\n")
 
     write_chain(oplog)
