@@ -199,6 +199,14 @@ their machines. → `ronald@atelyaos.com`
 - [ ] Optional Ed25519 / ML-DSA signing (stdlib HMAC stays the default)
 - [ ] Live-store invalidation hook for hard-erase (engine 0.3)
 
+## How this was built
+
+**AI-assisted, human-verified.** Much of this code was written with AI assistance.
+Every claim in this README was executed and checked against real output before
+publication — that is what the 63-test suite, the four adversarial acceptance
+suites, and the published benchmark misses in [CHANGELOG.md](CHANGELOG.md) are
+for. Where a run failed, the failure is in the history rather than edited out.
+
 ## Security & license
 
 Vulnerabilities: see [SECURITY.md](SECURITY.md) (private reporting).
