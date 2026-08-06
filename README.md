@@ -96,14 +96,15 @@ into a ledger the writer cannot touch, then check consistency later.
 
 ```bash
 atelya-attest attest log.jsonl --out chain.jsonl
-atelya-anchor anchor chain.jsonl --ledger /separate-control/anchors.jsonl --label prod
+mkdir -p ~/anchors        # in production: a different account/host/WORM store
+atelya-anchor anchor chain.jsonl --ledger ~/anchors/anchors.jsonl --label prod
 
 # attacker rewrites the op-log AND re-attests the whole chain:
 python3 -c "import pathlib as p; f=p.Path('log.jsonl'); f.write_text(f.read_text().replace('penicillin','aspirin'))"
 atelya-attest attest log.jsonl --out chain.jsonl
 
 atelya-attest verify chain.jsonl                 # ✅ VERIFIED — the chain alone is blind
-atelya-anchor check chain.jsonl --ledger /separate-control/anchors.jsonl --label prod
+atelya-anchor check chain.jsonl --ledger ~/anchors/anchors.jsonl --label prod
 # ❌ ANCHOR CONFLICT … history rewritten (same-position different-root) — exit 1
 ```
 
@@ -124,10 +125,13 @@ separation of duties is what turns "detects accidents" into "detects insiders".
 
 ## Verify it yourself
 
+From a clone (the 63-test suite lives here, not in the wheel):
+
 ```bash
 python -m pytest tests/ -q      # 63 tests: known-answer vectors, tz-matrix,
                                 # tamper/reorder/truncation, erasure semantics
 atelya-attest --selftest && atelya-anchor --selftest && atelya-govern --selftest
+# ^ these three work from a pip install too — offline, no network
 ```
 
 We pre-register benchmark pass lines and **publish the misses** — see
