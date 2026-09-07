@@ -233,6 +233,29 @@ def _purge_vec(oplog_path, ids):
     return dropped
 
 
+# F3c: signal running servers. Suffix must match amem/serve_common.PURGE_EPOCH_SUFFIX.
+PURGE_EPOCH_SUFFIX = ".epoch"
+
+
+def _bump_epoch(oplog_path):
+    """A running server caches this store in RAM; touching the epoch file makes
+    it rebuild on the next request instead of serving erased data.
+
+    Deliberately a separate file from the op-log: the server appends to the log
+    constantly, so watching the log's own mtime would reload on every request.
+    """
+    import os as _os
+    import time as _time
+
+    try:
+        p = oplog_path + PURGE_EPOCH_SUFFIX
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(str(_time.time()))
+        _os.utime(p, None)
+    except OSError:
+        pass
+
+
 def erase(path, pattern, hard=False):
     """GDPR right-to-erasure. soft: append forget events (auditable, text retained).
     hard: rewrite the log dropping the matched records' content entirely; log a purge marker."""
@@ -254,6 +277,7 @@ def erase(path, pattern, hard=False):
                     )
                     + "\n"
                 )
+        _bump_epoch(path)  # F3c
         return {"matched": len(targets), "mode": "soft", "ids": sorted(targets)}
     # hard purge: filter out add/update/supersede/forget for targets; keep a purge audit marker
     kept = [
@@ -276,6 +300,7 @@ def erase(path, pattern, hard=False):
         for ev in kept:
             f.write(json.dumps(ev, ensure_ascii=False) + "\n")
     os.replace(tmp, path)
+    _bump_epoch(path)  # F3c
     n_vec = _purge_vec(path, targets)  # F3a: erase the embeddings too
     return {"matched": len(targets), "mode": "hard", "ids": sorted(targets), "vec_purged": n_vec}
 
@@ -308,6 +333,7 @@ def retention(path, max_age_days=None, max_active=None, hard=False):
             for ev in kept:
                 f.write(json.dumps(ev, ensure_ascii=False) + "\n")
         os.replace(tmp, path)
+        _bump_epoch(path)  # F3c
         _purge_vec(path, set(doomed))  # F3a: erase the embeddings too
     else:
         with open(path, "a", encoding="utf-8") as f:
@@ -318,6 +344,7 @@ def retention(path, max_age_days=None, max_active=None, hard=False):
                     )
                     + "\n"
                 )
+        _bump_epoch(path)  # F3c
     return {"retired": len(doomed), "mode": "hard" if hard else "soft", "ids": doomed}
 
 
