@@ -195,6 +195,44 @@ def _match_ids(events, pattern):
     return [rid for rid, record in rec.items() if regex.search(record.get("text") or "")]
 
 
+def _purge_vec(oplog_path, ids):
+    """F3a: drop erased records from the `<oplog>.vec` sidecar.
+
+    The sidecar caches one embedding per record. A hard erasure that rewrites the
+    op-log but leaves the sidecar behind is NOT a complete erasure: embeddings are
+    approximately invertible back to text. Returns the number of lines removed.
+    """
+    vec_path = oplog_path + ".vec"
+    if not os.path.exists(vec_path) or not ids:
+        return 0
+    targets = set(ids)
+    kept, dropped = [], 0
+    with open(vec_path, encoding="utf-8") as f:
+        for line in f:
+            s = line.strip()
+            if not s:
+                continue
+            try:
+                if json.loads(s).get("id") in targets:
+                    dropped += 1
+                    continue
+            except Exception:
+                pass  # unparseable line: keep it, never lose data silently
+            kept.append(s)
+    if not dropped:
+        return 0
+    tmp = vec_path + ".purge.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            for s in kept:
+                f.write(s + "\n")
+        os.replace(tmp, vec_path)  # atomic
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+    return dropped
+
+
 def erase(path, pattern, hard=False):
     """GDPR right-to-erasure. soft: append forget events (auditable, text retained).
     hard: rewrite the log dropping the matched records' content entirely; log a purge marker."""
@@ -238,7 +276,8 @@ def erase(path, pattern, hard=False):
         for ev in kept:
             f.write(json.dumps(ev, ensure_ascii=False) + "\n")
     os.replace(tmp, path)
-    return {"matched": len(targets), "mode": "hard", "ids": sorted(targets)}
+    n_vec = _purge_vec(path, targets)  # F3a: erase the embeddings too
+    return {"matched": len(targets), "mode": "hard", "ids": sorted(targets), "vec_purged": n_vec}
 
 
 def retention(path, max_age_days=None, max_active=None, hard=False):
@@ -269,6 +308,7 @@ def retention(path, max_age_days=None, max_active=None, hard=False):
             for ev in kept:
                 f.write(json.dumps(ev, ensure_ascii=False) + "\n")
         os.replace(tmp, path)
+        _purge_vec(path, set(doomed))  # F3a: erase the embeddings too
     else:
         with open(path, "a", encoding="utf-8") as f:
             for rid in doomed:
