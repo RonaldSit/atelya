@@ -320,3 +320,108 @@ def test_anchor_check_forgotten_label_fails_loudly(tmp_path):
     with contextlib.redirect_stdout(buf):
         rc = anchor.main(["check", str(ch), "--ledger", str(led), "--label", "demo"])
     assert rc == 0 and "VERIFIED" in buf.getvalue()
+
+
+# =========================== post-purge hooks =====================================
+def _recorder(calls, fail=False):
+    def hook(oplog_path, purged, match):
+        calls.append((oplog_path, purged, match))
+        if fail:
+            raise RuntimeError("cannot reach the session store")
+        return {"removed": len(purged)}
+
+    return hook
+
+
+def _sha(text):
+    import hashlib as _h
+
+    return _h.sha256(text.encode("utf-8")).hexdigest()
+
+
+def test_purge_hook_gets_ids_digests_and_matcher_never_the_text(logfile, monkeypatch):
+    calls = []
+    monkeypatch.setattr(gov, "_purge_hooks", lambda: [("rec", _recorder(calls))])
+    r = gov.erase(logfile, "Airbus", hard=True)
+    assert r["hooks"] == [{"hook": "rec", "ok": True, "result": {"removed": 1}}]
+    ((path, purged, match),) = calls
+    assert path == logfile
+    # every text the record ever had (add + update), as digests only
+    assert purged == {"b": [_sha("user works at Airbus"), _sha("user works at Airbus (verified)")]}
+    assert match("a note about AIRBUS") and not match("user works at Boeing")  # same regex, re.I
+    flat = json.dumps([path, purged])
+    assert "Airbus" not in flat and "airbus" not in flat.lower()  # never the erased text
+
+
+def test_purge_hooks_discovered_from_entry_points(monkeypatch):
+    import importlib.metadata as md
+
+    class EP:
+        def __init__(self, name, fn=None, err=None):
+            self.name, self._fn, self._err = name, fn, err
+
+        def load(self):
+            if self._err:
+                raise self._err
+            return self._fn
+
+    good = _recorder([])
+    seen = {}
+
+    def fake_entry_points(group=None):
+        seen["group"] = group
+        return [EP("zeta", good), EP("alpha", err=ImportError("no module named x"))]
+
+    monkeypatch.setattr(md, "entry_points", fake_entry_points)
+    hooks = gov._purge_hooks()
+    assert seen["group"] == "atelya.purge_hooks"
+    assert [n for n, _ in hooks] == ["alpha", "zeta"]  # sorted, deterministic
+    assert isinstance(hooks[0][1], ImportError) and hooks[1][1] is good
+    res = gov.run_purge_hooks("x.jsonl", {}, None)
+    assert res[0]["hook"] == "alpha" and res[0]["ok"] is False and "ImportError" in res[0]["error"]
+    assert res[1] == {"hook": "zeta", "ok": True, "result": {"removed": 0}}
+
+
+def test_cli_hard_erase_says_when_no_hook_is_installed(logfile, monkeypatch, capsys):
+    monkeypatch.setattr(gov, "_purge_hooks", lambda: [])
+    assert gov.main(["erase", logfile, "--match", "Airbus", "--hard"]) == 0
+    out = capsys.readouterr().out
+    assert "post-purge hooks: none installed" in out and "atelya.purge_hooks" in out
+
+
+def test_cli_prints_every_hook_outcome_and_fails_if_one_failed(logfile, monkeypatch, capsys):
+    monkeypatch.setattr(
+        gov, "_purge_hooks", lambda: [("good", _recorder([])), ("bad", _recorder([], fail=True))]
+    )
+    assert gov.main(["erase", logfile, "--match", "Airbus", "--hard"]) == 1
+    out = capsys.readouterr().out
+    assert 'post-purge hook good: ok {"removed": 1}' in out
+    assert "post-purge hook bad: FAILED RuntimeError: cannot reach the session store" in out
+    assert "ERASE INCOMPLETE: 1 post-purge hook(s) failed" in out
+
+
+def test_cli_soft_erase_says_hooks_not_run(logfile, monkeypatch, capsys):
+    calls = []
+    monkeypatch.setattr(gov, "_purge_hooks", lambda: [("rec", _recorder(calls))])
+    assert gov.main(["erase", logfile, "--match", "Airbus"]) == 0
+    assert calls == []
+    assert "post-purge hooks: not run (soft mode" in capsys.readouterr().out
+
+
+def test_hard_erase_rerun_with_no_match_still_runs_hooks(logfile, monkeypatch):
+    calls = []
+    monkeypatch.setattr(gov, "_purge_hooks", lambda: [("rec", _recorder(calls))])
+    gov.erase(logfile, "Airbus", hard=True)
+    r = gov.erase(logfile, "Airbus", hard=True)  # already purged: matches nothing
+    assert r["matched"] == 0 and len(calls) == 2
+    _, purged, match = calls[1]
+    assert purged == {} and match("Airbus")  # the hook can still clean up by pattern
+
+
+def test_retention_hard_runs_hooks_without_a_matcher(logfile, monkeypatch, capsys):
+    calls = []
+    monkeypatch.setattr(gov, "_purge_hooks", lambda: [("rec", _recorder(calls))])
+    assert gov.main(["retention", logfile, "--max-age-days", "1", "--hard"]) == 0
+    ((_, purged, match),) = calls
+    assert set(purged) == {"b"} and match is None
+    assert "post-purge hook rec: ok" in capsys.readouterr().out

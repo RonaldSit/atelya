@@ -32,6 +32,12 @@ CLI:
   python amem_governance.py verify-chain <chain.jsonl> [--key K|--keyfile F]
   python amem_governance.py --selftest
 
+Post-purge hooks: after every HARD erase/retention, each installed entry point
+in the group "atelya.purge_hooks" is called with the op-log path, the purged
+record ids with SHA-256 digests of their texts, and (erase only) the matcher.
+Hooks never receive the erased text. The CLI prints every hook and its
+outcome, or a line saying none is installed; a failed hook exits 1.
+
 Integrity (attest — hash-chain the op-log): SHA-256 (or HMAC-SHA256 with a key) chain per
 the 2026 audit-trail pattern (arXiv 2601.20727; NIST SP 800-92). Tamper-EVIDENT, not
 tamper-PROOF: any modification/deletion/reorder is detected and located; anchor the printed
@@ -256,13 +262,76 @@ def _bump_epoch(oplog_path):
         pass
 
 
+PURGE_HOOK_GROUP = "atelya.purge_hooks"
+
+
+def _purge_hooks():
+    """Post-purge hooks installed in this environment: [(name, fn_or_error)].
+
+    A hook is a Python entry point in the group "atelya.purge_hooks", called
+    after a HARD purge as fn(oplog_path, purged, match):
+      purged  {record_id: [sha256 hex of every text that record ever had]}
+      match   callable(str) -> bool, the erase regex (re.I); None for retention
+    It never receives the erased text. A product that keeps copies of memory
+    text outside the op-log (session caches, tool files) registers one to
+    remove them. A hook that fails to load is reported as a failed hook.
+    """
+    try:
+        from importlib.metadata import entry_points
+
+        eps = list(entry_points(group=PURGE_HOOK_GROUP))
+    except Exception as e:
+        return [("(hook discovery)", e)]
+    out = []
+    for ep in sorted(eps, key=lambda e: e.name):
+        try:
+            out.append((ep.name, ep.load()))
+        except Exception as e:
+            out.append((ep.name, e))
+    return out
+
+
+def _text_digests(events, ids):
+    """{id: [sha256 of each distinct add/update text]} for the purged ids."""
+    out = {rid: [] for rid in ids}
+    for ev in events:
+        rid = ev.get("id")
+        text = ev.get("text")
+        if rid in out and ev.get("op") in ("add", "update") and isinstance(text, str):
+            h = hashlib.sha256(text.encode("utf-8")).hexdigest()
+            if h not in out[rid]:
+                out[rid].append(h)
+    return out
+
+
+def run_purge_hooks(oplog_path, purged, match=None):
+    """Call every installed post-purge hook. Never raises; returns
+    [{"hook": name, "ok": bool, "result" or "error": ...}]."""
+    results = []
+    for name, fn in _purge_hooks():
+        if isinstance(fn, Exception):
+            results.append({"hook": name, "ok": False, "error": f"{type(fn).__name__}: {fn}"[:300]})
+            continue
+        try:
+            results.append({"hook": name, "ok": True, "result": fn(oplog_path, purged, match)})
+        except Exception as e:
+            results.append({"hook": name, "ok": False, "error": f"{type(e).__name__}: {e}"[:300]})
+    return results
+
+
 def erase(path, pattern, hard=False):
     """GDPR right-to-erasure. soft: append forget events (auditable, text retained).
-    hard: rewrite the log dropping the matched records' content entirely; log a purge marker."""
+    hard: rewrite the log dropping the matched records' content entirely; log a purge
+    marker; then run the post-purge hooks (also when nothing matched, so a re-run
+    finishes a cleanup a failed hook left undone)."""
     events = read_log(path)
+    regex = re.compile(pattern, re.I)
     targets = set(_match_ids(events, pattern))
+    if not targets and not hard:
+        return {"matched": 0, "mode": "soft", "ids": []}
     if not targets:
-        return {"matched": 0, "mode": "hard" if hard else "soft", "ids": []}
+        hooks = run_purge_hooks(path, {}, lambda text: bool(regex.search(text or "")))
+        return {"matched": 0, "mode": "hard", "ids": [], "hooks": hooks}
     if not hard:
         with open(path, "a", encoding="utf-8") as f:
             for rid in targets:
@@ -302,7 +371,16 @@ def erase(path, pattern, hard=False):
     os.replace(tmp, path)
     _bump_epoch(path)  # F3c
     n_vec = _purge_vec(path, targets)  # F3a: erase the embeddings too
-    return {"matched": len(targets), "mode": "hard", "ids": sorted(targets), "vec_purged": n_vec}
+    hooks = run_purge_hooks(
+        path, _text_digests(events, targets), lambda text: bool(regex.search(text or ""))
+    )
+    return {
+        "matched": len(targets),
+        "mode": "hard",
+        "ids": sorted(targets),
+        "vec_purged": n_vec,
+        "hooks": hooks,
+    }
 
 
 def retention(path, max_age_days=None, max_active=None, hard=False):
@@ -323,7 +401,9 @@ def retention(path, max_age_days=None, max_active=None, hard=False):
             doomed += active[: len(active) - max_active]  # oldest first
     doomed = sorted(set(doomed))
     if not doomed:
-        return {"retired": 0, "mode": "hard" if hard else "soft"}
+        if hard:
+            return {"retired": 0, "mode": "hard", "hooks": run_purge_hooks(path, {}, None)}
+        return {"retired": 0, "mode": "soft"}
     if hard:
         kept = [ev for ev in events if ev.get("id") not in set(doomed)]
         for rid in doomed:
@@ -335,6 +415,8 @@ def retention(path, max_age_days=None, max_active=None, hard=False):
         os.replace(tmp, path)
         _bump_epoch(path)  # F3c
         _purge_vec(path, set(doomed))  # F3a: erase the embeddings too
+        hooks = run_purge_hooks(path, _text_digests(events, doomed), None)
+        return {"retired": len(doomed), "mode": "hard", "ids": doomed, "hooks": hooks}
     else:
         with open(path, "a", encoding="utf-8") as f:
             for rid in doomed:
@@ -375,6 +457,36 @@ def _print_rows(rows, n=40):
         )
     if len(rows) > n:
         print(f"... (+{len(rows) - n} more; use --out to export full)")
+
+
+def _print_hooks(record, hard):
+    """Say which post-purge hooks ran and how each ended. Returns the exit code."""
+    if not hard:
+        print("  post-purge hooks: not run (soft mode keeps the text in the op-log by design)")
+        return 0
+    hooks = record.get("hooks") or []
+    if not hooks:
+        print(
+            f"  post-purge hooks: none installed (entry-point group {PURGE_HOOK_GROUP!r}); "
+            "only the op-log and its .vec sidecar were purged"
+        )
+        return 0
+    failed = 0
+    for h in hooks:
+        if h["ok"]:
+            print(
+                f"  post-purge hook {h['hook']}: ok {json.dumps(h.get('result'), ensure_ascii=False, default=str)}"
+            )
+        else:
+            failed += 1
+            print(f"  post-purge hook {h['hook']}: FAILED {h['error']}")
+    if failed:
+        print(
+            f"  ERASE INCOMPLETE: {failed} post-purge hook(s) failed. Fix the cause and re-run "
+            "the same command; it is safe to repeat."
+        )
+        return 1
+    return 0
 
 
 def main(argv=None):
@@ -479,13 +591,15 @@ def main(argv=None):
             record = erase(args.oplog, args.match, hard=args.hard)
         except re.error as e:
             sys.exit(f"invalid --match regex: {e}")
-        print(json.dumps(record, ensure_ascii=False))
+        print(json.dumps(record, ensure_ascii=False, default=str))
         print(
             f"  {'HARD PURGE (content removed)' if args.hard else 'SOFT forget (auditable; text retained in log)'}"
         )
+        return _print_hooks(record, args.hard)
     elif args.cmd == "retention":
         record = retention(args.oplog, args.max_age_days, args.max_active, hard=args.hard)
-        print(json.dumps(record, ensure_ascii=False))
+        print(json.dumps(record, ensure_ascii=False, default=str))
+        return _print_hooks(record, args.hard)
     return 0
 
 

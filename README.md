@@ -48,6 +48,7 @@ atelya-govern verify-chain chain.jsonl
 | GDPR erasure | `atelya-govern erase [--hard]` | soft = auditable forget (text retained); hard = content gone, marker records only a **SHA-256 digest** of the pattern — the erasure is provable, the secret never leaks |
 | Audit views | `audit / lineage / conflicts / summary` | full timeline, one record's life, flagged contradictions |
 | Retention | `retention --max-age / --max-active` | age/cap-based retirement, logged like everything else |
+| Post-purge hooks | entry-point group `atelya.purge_hooks` | after every hard erase/retention, each installed hook gets the purged ids, **SHA-256 digests** of their texts and (erase only) the matcher — never the text — so a product can remove its own copies; the CLI prints every hook's outcome (or that none is installed) and exits 1 if one failed |
 | Auditor export | `audit --out report.json` (or `.csv`) | machine-readable evidence for compliance packs |
 | Self-tests | `--selftest` on all three tools | known-answer vectors, runnable anywhere, offline |
 

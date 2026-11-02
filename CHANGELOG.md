@@ -6,6 +6,20 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- Post-purge hooks. After every **hard** erase or retention, each installed entry
+  point in the group `atelya.purge_hooks` is called as
+  `hook(oplog_path, purged, match)`: `purged` maps each purged record id to the
+  SHA-256 digests of every text it ever had; `match` is the erase regex (`None`
+  for retention). Hooks **never receive the erased text**. They let a product
+  that keeps copies of memory text outside the op-log (session caches, tool
+  files) remove them in the same command. The CLI prints every hook and its
+  outcome, or one line saying none is installed; a failed hook makes it exit 1
+  with `ERASE INCOMPLETE`. A hard erase that matches nothing still runs the
+  hooks, so re-running the same command finishes an interrupted cleanup.
+  Soft mode runs no hooks (the text stays in the op-log by design). Without
+  hooks installed, behaviour is unchanged. 7 new tests; suite: **70**.
+
 ### Changed
 - Readability refactor: cryptic locals renamed (`ev`→`event`, `cp`→`checkpoint`,
   `ch`→`chain_head`, `r`→`record`, `rx`→`regex`, `st`→`status`, `ap`→`parser`),
