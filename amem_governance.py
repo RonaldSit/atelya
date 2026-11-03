@@ -38,6 +38,12 @@ record ids with SHA-256 digests of their texts, and (erase only) the matcher.
 Hooks never receive the erased text. The CLI prints every hook and its
 outcome, or a line saying none is installed; a failed hook exits 1.
 
+Exit codes (erase, retention): 0 on success, including when nothing matched
+or nothing was due. Erasure is idempotent: re-running after a failed hook is
+expected to match nothing. 1 means a post-purge hook failed. To know whether
+anything was erased, read "matched" (erase) or "retired" (retention) from
+the JSON line the command prints first, not the exit code.
+
 Integrity (attest — hash-chain the op-log): SHA-256 (or HMAC-SHA256 with a key) chain per
 the 2026 audit-trail pattern (arXiv 2601.20727; NIST SP 800-92). Tamper-EVIDENT, not
 tamper-PROOF: any modification/deletion/reorder is detected and located; anchor the printed
