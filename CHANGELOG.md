@@ -20,6 +20,16 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   Soft mode runs no hooks (the text stays in the op-log by design). Without
   hooks installed, behaviour is unchanged. 7 new tests; suite: **70**.
 
+### Fixed
+- `erase` that matches no record printed `HARD PURGE (content removed)` (or
+  `SOFT forget` without `--hard`), and with no hooks installed also claimed
+  "the op-log and its .vec sidecar were purged". Nothing had been touched.
+  It now prints `NO MATCH: no record matched --match; the op-log was not
+  changed` and "nothing was purged"; the pattern is never echoed, since it
+  may be the very text being erased. `retention` with nothing due prints
+  "nothing was purged" too. Output for a matching erase and exit codes are
+  unchanged. 5 new tests; suite: **75**.
+
 ### Changed
 - Readability refactor: cryptic locals renamed (`ev`→`event`, `cp`→`checkpoint`,
   `ch`→`chain_head`, `r`→`record`, `rx`→`regex`, `st`→`status`, `ap`→`parser`),

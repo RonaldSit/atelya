@@ -425,3 +425,36 @@ def test_retention_hard_runs_hooks_without_a_matcher(logfile, monkeypatch, capsy
     ((_, purged, match),) = calls
     assert set(purged) == {"b"} and match is None
     assert "post-purge hook rec: ok" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("hard", [False, True])
+def test_cli_erase_no_match_says_so_and_changes_nothing(logfile, monkeypatch, capsys, hard):
+    monkeypatch.setattr(gov, "_purge_hooks", lambda: [])
+    before = open(logfile, "rb").read()
+    argv = ["erase", logfile, "--match", "zz-no-such-text-zz"] + (["--hard"] if hard else [])
+    assert gov.main(argv) == 0
+    out = capsys.readouterr().out
+    assert "NO MATCH: no record matched --match" in out
+    assert "content removed" not in out and "HARD PURGE" not in out and "SOFT forget" not in out
+    assert "were purged" not in out  # the no-hook line must not claim a purge either
+    assert "zz-no-such-text-zz" not in out  # the pattern may be the very text to erase
+    assert open(logfile, "rb").read() == before
+
+
+@pytest.mark.parametrize(
+    "hard,verdict", [(True, "HARD PURGE (content removed)"), (False, "SOFT forget")]
+)
+def test_cli_erase_with_a_match_keeps_its_verdict(logfile, monkeypatch, capsys, hard, verdict):
+    monkeypatch.setattr(gov, "_purge_hooks", lambda: [])
+    gov.main(["erase", logfile, "--match", "Airbus"] + (["--hard"] if hard else []))
+    out = capsys.readouterr().out
+    assert verdict in out and "NO MATCH" not in out
+
+
+def test_cli_retention_with_nothing_due_says_nothing_was_purged(logfile, monkeypatch, capsys):
+    monkeypatch.setattr(gov, "_purge_hooks", lambda: [])
+    argv = ["retention", logfile, "--max-age-days", "100000", "--hard"]
+    assert gov.main(argv) == 0
+    out = capsys.readouterr().out
+    assert '"retired": 0' in out
+    assert "nothing was purged" in out and "were purged" not in out

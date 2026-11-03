@@ -466,9 +466,14 @@ def _print_hooks(record, hard):
         return 0
     hooks = record.get("hooks") or []
     if not hooks:
+        purged = record.get("matched", record.get("retired", 0))
         print(
             f"  post-purge hooks: none installed (entry-point group {PURGE_HOOK_GROUP!r}); "
-            "only the op-log and its .vec sidecar were purged"
+            + (
+                "only the op-log and its .vec sidecar were purged"
+                if purged
+                else "nothing was purged"
+            )
         )
         return 0
     failed = 0
@@ -592,9 +597,14 @@ def main(argv=None):
         except re.error as e:
             sys.exit(f"invalid --match regex: {e}")
         print(json.dumps(record, ensure_ascii=False, default=str))
-        print(
-            f"  {'HARD PURGE (content removed)' if args.hard else 'SOFT forget (auditable; text retained in log)'}"
-        )
+        if not record["matched"]:  # never echo the pattern: it may be the text to erase
+            print("  NO MATCH: no record matched --match; the op-log was not changed")
+            if args.hard:
+                print("  (post-purge hooks still run: a re-run finishes an earlier cleanup)")
+        elif args.hard:
+            print("  HARD PURGE (content removed)")
+        else:
+            print("  SOFT forget (auditable; text retained in log)")
         return _print_hooks(record, args.hard)
     elif args.cmd == "retention":
         record = retention(args.oplog, args.max_age_days, args.max_active, hard=args.hard)
