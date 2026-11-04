@@ -7,6 +7,28 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Changed
+- **Hard purge removes every trace it can reach, by one rule for erase and
+  retention.** Every event naming a purged id in `id`, `a`, `b` or `holder`
+  goes (retention used to keep flags); old `key_conflict` events, which stored
+  the first 80 characters of a text and no id, go when that excerpt is a
+  prefix of a purged text; old-format `{"text": ...}` lines without an id are
+  purgeable (they were matched but left in the file); `<oplog>.torn` and
+  `<oplog>.corrupt` lines holding a purged text (a prefix of the `"text"`
+  value, or a 20-character window, matched raw and JSON-escaped) go; and
+  `.vec` lines of ids the op-log no longer names go.
+- **Purge markers hold HMAC-SHA256 of the pattern** (`erasure:hmac-sha256:`)
+  with `<data_dir>/.erasure_key` (32 bytes, mode 0600, created on first need,
+  never deleted by erase or retention; back it up with the data directory,
+  or existing HMACs can no longer be checked). A plain SHA-256 of a short or
+  guessable pattern could be confirmed by hashing guesses. Existing
+  `erasure:sha256:` markers are left as written. A marker for an id-less line
+  names no id (its positional id would point at another line after the
+  rewrite).
+- **A hard purge refuses while `<oplog>.attest.jsonl` exists**, because the
+  chain stores every event verbatim; `--drop-attest` deletes the chain file
+  and proceeds. Chain files written elsewhere with `--out` are not checked.
+  8 new tests, 2 changed (they pinned the plain-sha256 marker and retention
+  keeping flags); suite: **93**.
 - **Bad op-log lines are no longer skipped silently.** The op-log is the
   source of truth, so `read_log` (and every command built on it) now raises
   `OplogError` for a line that is not valid JSON or is JSON but not an
