@@ -119,14 +119,16 @@ if os.name == "nt":  # NOT checked: no Windows test machine
     import msvcrt
 
     def _lock_fd(fd):
+        # LK_LOCK retries only once a second; poll the non-blocking form instead
         while True:
             try:
                 os.lseek(fd, 0, os.SEEK_SET)
-                msvcrt.locking(fd, msvcrt.LK_LOCK, 1)  # gives up after ~10 s: retry
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
                 return
             except OSError as e:
-                if e.errno not in (errno.EDEADLOCK, errno.EACCES):
+                if e.errno not in (errno.EACCES, errno.EDEADLOCK):
                     raise
+                time.sleep(0.005)
 
     def _unlock_fd(fd):
         os.lseek(fd, 0, os.SEEK_SET)
