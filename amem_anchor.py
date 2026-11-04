@@ -374,7 +374,11 @@ def main(argv=None):
     parser.add_argument("--at")
     parser.add_argument("--require-anchor", action="store_true")
     parser.add_argument("--selftest", action="store_true")
-    args = parser.parse_args(argv)
+    # parse_intermixed_args, not parse_args: on Python 3.10, 3.11, 3.12.0-3.12.6 and
+    # 3.13.0, parse_args gives the optional positional zero strings when an option
+    # follows the subcommand, then rejects the path as unrecognized. No subparsers,
+    # REMAINDER or mutually exclusive groups here (parse_intermixed_args rejects them).
+    args = parser.parse_intermixed_args(argv)
 
     if args.selftest:
         return _selftest()
