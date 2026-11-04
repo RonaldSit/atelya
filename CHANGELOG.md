@@ -6,7 +6,53 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **Hard purge removes every trace it can reach, by one rule for erase and
+  retention.** Every event naming a purged id in `id`, `a`, `b` or `holder`
+  goes (retention used to keep flags); old `key_conflict` events, which stored
+  the first 80 characters of a text and no id, go when that excerpt is a
+  prefix of a purged text; old-format `{"text": ...}` lines without an id are
+  purgeable (they were matched but left in the file); `<oplog>.torn` and
+  `<oplog>.corrupt` lines holding a purged text (a prefix of the `"text"`
+  value, or a 20-character window, matched raw and JSON-escaped) go; and
+  `.vec` lines of ids the op-log no longer names go.
+- **Purge markers hold HMAC-SHA256 of the pattern** (`erasure:hmac-sha256:`)
+  with `<data_dir>/.erasure_key` (32 bytes, mode 0600, created on first need,
+  never deleted by erase or retention; back it up with the data directory,
+  or existing HMACs can no longer be checked). A plain SHA-256 of a short or
+  guessable pattern could be confirmed by hashing guesses. Existing
+  `erasure:sha256:` markers are left as written. A marker for an id-less line
+  names no id (its positional id would point at another line after the
+  rewrite).
+- **A hard purge refuses while `<oplog>.attest.jsonl` exists**, because the
+  chain stores every event verbatim; `--drop-attest` deletes the chain file
+  and proceeds. Chain files written elsewhere with `--out` are not checked.
+  8 new tests, 2 changed (they pinned the plain-sha256 marker and retention
+  keeping flags); suite: **93**.
+- **Bad op-log lines are no longer skipped silently.** The op-log is the
+  source of truth, so `read_log` (and every command built on it) now raises
+  `OplogError` for a line that is not valid JSON or is JSON but not an
+  object, naming the file and line number and the repair command; the
+  message never contains the line. Before, invalid JSON was skipped and a
+  non-object line crashed with `AttributeError` or `TypeError`.
+  - A **torn tail** (the last line has no newline and does not parse, as
+    left by a crash mid-write) is appended unchanged to `<oplog>.torn` and
+    truncated, and the read continues.
+  - Hard `erase` and `retention` keep every other line **byte for byte**
+    (blank lines and legacy `{"text": ...}` lines included); before, they
+    re-serialized every kept event and dropped invalid lines. They refuse
+    to run when a middle line is bad.
+  - `verify-chain` never repairs the chain file; a bad line there is
+    reported as tampering.
+  - Every append, rewrite, torn-tail move and repair holds `<oplog>.lock`
+    (`fcntl.flock`; `msvcrt.locking` on Windows, not tested on Windows).
+
 ### Added
+- `repair --quarantine-bad-lines <oplog>`: a dry run lists bad lines by
+  number and category, never their content; `--apply` moves them unchanged
+  to `<oplog>.corrupt` as `<line number><TAB><line>`, moves a torn tail to
+  `<oplog>.torn`, and keeps every other line in order. 11 new tests, one
+  replaced (it pinned the silent skipping); suite: **85**.
 - Post-purge hooks. After every **hard** erase or retention, each installed entry
   point in the group `atelya.purge_hooks` is called as
   `hook(oplog_path, purged, match)`: `purged` maps each purged record id to the

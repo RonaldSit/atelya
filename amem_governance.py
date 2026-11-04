@@ -7,7 +7,11 @@ event-sources every operation into an append-only JSONL op-log; this module turn
 governance FEATURES enterprises require — without touching the core.
 
 Op-log events (amem memory.py): {"op":"add","id","text","key","created_at"} | {"op":"update",...}
-| {"op":"supersede","id"} | {"op":"forget","id"} | {"op":"key_conflict",...} | {"op":"flag","a","b","why"}.
+| {"op":"supersede","id"} | {"op":"forget","id"} | {"op":"key_conflict","id","holder","key","reason"}
+| {"op":"flag","a","b","why":<reason code>}. Only add and update carry record text; every other
+event names records only through id, a, b and holder (REF_FIELDS), and carries reason codes or
+HMACs. Older logs may hold key_conflict events with a "text" excerpt and no id, and flags whose
+"why" is text; a hard purge removes them with their record.
 Superseded/forgotten records are RETAINED (status change, not removal) => full auditable history.
 
 Features (all pure-python over the op-log; no amem / GPU / API):
@@ -26,12 +30,21 @@ CLI:
   python amem_governance.py audit   <oplog.jsonl> [--out audit.json|audit.csv]
   python amem_governance.py lineage <oplog.jsonl> --id <rid>
   python amem_governance.py conflicts <oplog.jsonl>
-  python amem_governance.py erase   <oplog.jsonl> --match <regex> [--hard]
-  python amem_governance.py retention <oplog.jsonl> --max-age-days N [--hard]
+  python amem_governance.py erase   <oplog.jsonl> --match <regex> [--hard [--drop-attest]]
+  python amem_governance.py retention <oplog.jsonl> --max-age-days N [--hard [--drop-attest]]
   python amem_governance.py attest    <oplog.jsonl> [--out chain.jsonl] [--key K|--keyfile F]
   python amem_governance.py verify-chain <chain.jsonl> [--key K|--keyfile F]
+  python amem_governance.py repair --quarantine-bad-lines <oplog.jsonl> [--apply]
   python amem_governance.py --selftest
 
+Hard purge (erase --hard, retention --hard): removes the record's lines, every event naming
+it, matching lines of <oplog>.torn and <oplog>.corrupt, and its .vec lines; the purge marker
+holds HMAC-SHA256 of the erase pattern with <data dir>/.erasure_key (created on first need,
+mode 0600, never deleted by erase or retention; back it up with the data directory, or
+existing HMACs can no longer be checked; markers written before hold a plain SHA-256 and are
+left as they are). It refuses while <oplog>.attest.jsonl exists, because that chain stores
+every event verbatim; --drop-attest deletes the chain file first. Chains written elsewhere
+with --out are not checked.
 Post-purge hooks: after every HARD erase/retention, each installed entry point
 in the group "atelya.purge_hooks" is called with the op-log path, the purged
 record ids with SHA-256 digests of their texts, and (erase only) the matcher.
@@ -51,39 +64,250 @@ root externally (WORM/notary) for full assurance.
 """
 
 import argparse
+import contextlib
 import csv
+import errno
 import hashlib
+import hmac
 import json
+import logging
 import os
 import re
+import secrets
+import shlex
 import sys
+import threading
 import time
 import signal
 
+log = logging.getLogger("amem_governance")
 
-def read_log(path):
-    out = []
-    with open(path, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
+
+# ---- op-log parsing and locking -------------------------------------------------
+# Same rules as amem/oplog.py, kept as a separate copy because this module is
+# stdlib-only and standalone. The parse vectors in the atelya repo check both.
+# - A torn tail (last line without a newline that is not a JSON object) is
+#   appended unchanged to <file>.torn and truncated, under the lock.
+# - Any other bad line raises OplogError: never skipped silently.
+# - Every append, torn-tail move, rewrite and repair holds <oplog>.lock.
+LOCK_SUFFIX = ".lock"
+TORN_SUFFIX = ".torn"
+CORRUPT_SUFFIX = ".corrupt"
+_DESCR = {
+    "invalid_json": "is not valid JSON",
+    "not_object": "is JSON but not an object",
+    "torn_tail": "is an incomplete last line, and the directory is read-only so it cannot be moved",
+}
+_READONLY_ERRNOS = {errno.EACCES, errno.EPERM, errno.EROFS}
+
+
+class OplogError(ValueError):
+    """A bad line the reader will not skip. Never carries the line's content."""
+
+    def __init__(self, path, lineno, category):
+        self.path, self.lineno, self.category = path, lineno, category
+        q = shlex.quote(path)
+        super().__init__(
+            f"{path}: line {lineno} {_DESCR.get(category, category)}; refusing to load it. "
+            f"List bad lines: atelya-govern repair --quarantine-bad-lines {q} "
+            f"(then add --apply to move them to {path}.corrupt)"
+        )
+
+
+def classify(raw):
+    """(category, event) for one line without its newline. category is None
+    for a JSON object, else "blank", "invalid_json" or "not_object"."""
+    s = raw.strip()
+    if not s:
+        return "blank", None
+    try:
+        ev = json.loads(s.decode("utf-8"))
+    except ValueError:  # includes JSONDecodeError and UnicodeDecodeError
+        return "invalid_json", None
+    if not isinstance(ev, dict):
+        return "not_object", None
+    return None, ev
+
+
+if os.name == "nt":  # NOT checked: no Windows test machine
+    import msvcrt
+
+    def _lock_fd(fd):
+        # LK_LOCK retries only once a second; poll the non-blocking form instead
+        while True:
             try:
-                ev = json.loads(line)
-            except (
-                ValueError
-            ):  # malformed / non-JSON line -> skip (JSONDecodeError is a ValueError)
-                continue
-            if "op" not in ev and "text" in ev:  # legacy {"text":...} == add
-                ev = {
-                    "op": "add",
-                    "text": ev["text"],
-                    "id": ev.get("id"),
-                    "key": ev.get("key"),
-                    "created_at": ev.get("created_at"),
-                }
-            out.append(ev)
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                return
+            except OSError as e:
+                if e.errno not in (errno.EACCES, errno.EDEADLOCK):
+                    raise
+                time.sleep(0.005)
+
+    def _unlock_fd(fd):
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+
+else:
+    import fcntl
+
+    def _lock_fd(fd):
+        fcntl.flock(fd, fcntl.LOCK_EX)
+
+    def _unlock_fd(fd):
+        fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+_HELD = {}  # abspath -> [RLock, depth, fd]; reentrant within a process
+_HELD_GUARD = threading.Lock()
+
+
+@contextlib.contextmanager
+def oplog_lock(path, readonly_ok=False):
+    """Hold <path>.lock (exclusive, across processes and threads; reentrant in
+    one thread). Yields True. With readonly_ok, a directory where the lock file
+    cannot be created yields False instead of raising: the caller may only read."""
+    key = os.path.abspath(path)
+    with _HELD_GUARD:
+        ent = _HELD.setdefault(key, [threading.RLock(), 0, None])
+    with ent[0]:
+        if ent[1] == 0:
+            try:
+                fd = os.open(key + LOCK_SUFFIX, os.O_RDWR | os.O_CREAT, 0o600)
+            except OSError as e:
+                if readonly_ok and e.errno in _READONLY_ERRNOS:
+                    yield False
+                    return
+                raise
+            try:
+                _lock_fd(fd)
+            except BaseException:
+                os.close(fd)
+                raise
+            ent[2] = fd
+        ent[1] += 1
+        try:
+            yield True
+        finally:
+            ent[1] -= 1
+            if ent[1] == 0:
+                fd, ent[2] = ent[2], None
+                try:
+                    _unlock_fd(fd)
+                finally:
+                    os.close(fd)
+
+
+def _fix_tail(path, f, keep_torn=True, terminate_valid=False):
+    """Caller holds the lock; f is `path` opened for reading and writing.
+    A last line without a newline that is a JSON object gets its newline
+    (terminate_valid); anything else is a torn tail: appended unchanged to
+    <path>.torn (keep_torn) and truncated. Returns the torn bytes or None."""
+    f.seek(0, os.SEEK_END)
+    size = f.tell()
+    if size == 0:
+        return None
+    f.seek(size - 1)
+    if f.read(1) == b"\n":
+        return None
+    f.seek(0)
+    data = f.read()
+    start = data.rfind(b"\n") + 1
+    tail = data[start:]
+    if classify(tail)[0] is None:
+        if terminate_valid:
+            f.seek(0, os.SEEK_END)
+            f.write(b"\n")
+        return None
+    if keep_torn:
+        with open(path + TORN_SUFFIX, "ab") as t:
+            t.write(tail + b"\n")
+    f.truncate(start)
+    log.warning(
+        "%s: torn last line (%d bytes) %s",
+        path,
+        len(tail),
+        f"moved to {path + TORN_SUFFIX}" if keep_torn else "dropped",
+    )
+    return tail
+
+
+def _append_lines(path, lines):
+    """Append lines (str, no newline) under the lock, after a clean tail."""
+    with oplog_lock(path):
+        with open(path, "ab+") as f:
+            _fix_tail(path, f, keep_torn=True, terminate_valid=True)
+            for line in lines:
+                f.write((line + "\n").encode("utf-8"))
+
+
+def _load_lines(path, repair=True):
+    """[(lineno, raw bytes, event or None for a blank line)] for every line, read
+    under the lock. repair: move a torn tail to <path>.torn first; without it (or
+    in a read-only directory) a torn tail raises like any other bad line."""
+    if not os.path.exists(path):
+        raise FileNotFoundError(errno.ENOENT, "op-log not found", path)
+    with oplog_lock(path, readonly_ok=True) as locked:
+        with open(path, "rb") as f:
+            data = f.read()
+        if repair and data and not data.endswith(b"\n"):
+            start = data.rfind(b"\n") + 1
+            if classify(data[start:])[0] is not None:
+                if not locked:
+                    raise OplogError(path, data.count(b"\n") + 1, "torn_tail")
+                with open(path, "rb+") as f:
+                    _fix_tail(path, f, keep_torn=True)
+                    f.seek(0)
+                    data = f.read()
+    pieces = data.split(b"\n")
+    terminated = data.endswith(b"\n") or not data
+    if terminated:
+        pieces = pieces[:-1]
+    out = []
+    for i, raw in enumerate(pieces, 1):
+        cat, ev = classify(raw)
+        if cat == "blank":
+            out.append((i, raw, None))
+            continue
+        if cat is not None:
+            if i == len(pieces) and not terminated:
+                cat = "torn_tail"
+            raise OplogError(path, i, cat)
+        out.append((i, raw, ev))
     return out
+
+
+def _rewrite(path, raw_lines, extra_events):
+    """Caller holds the lock. Atomically replace the op-log with raw_lines
+    (bytes, unchanged, in order) followed by extra_events."""
+    tmp = path + ".tmp"
+    with open(tmp, "wb") as f:
+        for raw in raw_lines:
+            f.write(raw + b"\n")
+        for ev in extra_events:
+            f.write((json.dumps(ev, ensure_ascii=False) + "\n").encode("utf-8"))
+    os.replace(tmp, path)
+
+
+def _promote(ev):
+    if "op" not in ev and "text" in ev:  # legacy {"text":...} == add
+        return {
+            "op": "add",
+            "text": ev["text"],
+            "id": ev.get("id"),
+            "key": ev.get("key"),
+            "created_at": ev.get("created_at"),
+        }
+    return ev
+
+
+def read_events(path, repair=True):
+    """[(lineno, event)] for every non-blank line, as written (no legacy promotion)."""
+    return [(n, ev) for n, _raw, ev in _load_lines(path, repair) if ev is not None]
+
+
+def read_log(path, repair=True):
+    return [_promote(ev) for _n, ev in read_events(path, repair)]
 
 
 def replay(events):
@@ -207,12 +431,16 @@ def _match_ids(events, pattern):
     return [rid for rid, record in rec.items() if regex.search(record.get("text") or "")]
 
 
-def _purge_vec(oplog_path, ids):
+def _purge_vec(oplog_path, ids, keep_ids=None):
     """F3a: drop erased records from the `<oplog>.vec` sidecar.
 
     The sidecar caches one embedding per record. A hard erasure that rewrites the
     op-log but leaves the sidecar behind is NOT a complete erasure: embeddings are
-    approximately invertible back to text. Returns the number of lines removed.
+    approximately invertible back to text. With keep_ids (the record ids the
+    rewritten op-log still has), every other line goes too: an old-format line
+    without an id gets a new random id at every load, so its embeddings pile up
+    under ids no op-log line names. The sidecar is a cache; whatever is dropped is
+    recomputed on the next load. Returns the number of lines removed.
     """
     vec_path = oplog_path + ".vec"
     if not os.path.exists(vec_path) or not ids:
@@ -225,7 +453,8 @@ def _purge_vec(oplog_path, ids):
             if not s:
                 continue
             try:
-                if json.loads(s).get("id") in targets:
+                vid = json.loads(s).get("id")
+                if vid in targets or (keep_ids is not None and vid not in keep_ids):
                     dropped += 1
                     continue
             except Exception:
@@ -243,6 +472,220 @@ def _purge_vec(oplog_path, ids):
         if os.path.exists(tmp):
             os.remove(tmp)
     return dropped
+
+
+# ---- what a hard purge removes (events carry no record content) ------------------
+ATTEST_SUFFIX = ".attest.jsonl"
+ERASURE_KEY_NAME = ".erasure_key"
+# The fields through which an event names a record. Every event type, old or new,
+# names records only through these; a hard purge removes every event naming a
+# purged id in any of them.
+REF_FIELDS = ("id", "a", "b", "holder")
+_TEXT_FIELD = re.compile(r'"text"\s*:\s*"')
+_WINDOW = 20
+
+
+class AttestPresent(ValueError):
+    """A hard purge would leave the purged text in the default attest chain file."""
+
+
+def erasure_key(data_dir):
+    """The data directory's key for HMACs written to disk: 32 random bytes in
+    <data_dir>/.erasure_key, created here on first need (O_CREAT|O_EXCL, mode 0600).
+    It never leaves the machine and is never exported; erase and retention never
+    delete it. Back it up with the data directory: without it, existing HMACs can
+    no longer be checked. amem.serve_common.erasure_key reads and writes the same file."""
+    path = os.path.join(data_dir, ERASURE_KEY_NAME)
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
+    except FileExistsError:
+        pass
+    else:
+        try:
+            key = secrets.token_bytes(32)
+            while key:
+                key = key[os.write(fd, key) :]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    for _ in range(200):  # another process may still be writing it
+        with open(path, "rb") as f:
+            key = f.read()
+        if len(key) == 32:
+            return key
+        time.sleep(0.01)
+    raise RuntimeError(f"{path}: not a 32-byte key; refusing to compute HMACs with it")
+
+
+def _hmac_hex(oplog_path, value):
+    key = erasure_key(os.path.dirname(os.path.abspath(oplog_path)))
+    return hmac.new(key, value.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _attest_guard(path, drop_attest):
+    """Refuse a hard purge while the default attest chain exists: it stores every
+    event verbatim, so the purged text would stay in it. drop_attest deletes it.
+    Returns True when it was deleted. Chain files written elsewhere (--out) are
+    not checked."""
+    chain = path + ATTEST_SUFFIX
+    if not os.path.exists(chain):
+        return False
+    if not drop_attest:
+        raise AttestPresent(
+            f"{chain} exists: an attest chain stores every op-log event verbatim, including "
+            "the text a hard purge removes, so the purge would leave that text there. "
+            "Re-run with --drop-attest to delete the chain file and purge (its root no longer "
+            "matches afterwards), or move the chain out of the data directory first. Chain "
+            "files written elsewhere with --out are not checked."
+        )
+    os.remove(chain)
+    return True
+
+
+def _record_ids(lines):
+    """For each line, the id of the record its add creates, by replay's rule (the
+    line's id, else _auto<n> for the n-th add), or None."""
+    out, n = [], 0
+    for _n, _raw, ev in lines:
+        rid = None
+        if ev is not None:
+            pev = _promote(ev)
+            if pev.get("op", "add") == "add":
+                rid = pev.get("id")
+                if rid is None:
+                    rid = f"_auto{n}"
+                n += 1
+        out.append(rid)
+    return out
+
+
+def _purge_plan(lines, targets):
+    """(kept raw lines, {id: [texts]}, ids kept) for a hard purge of `targets`.
+    Dropped: the add line of each target (an id-less old-format line by its replay
+    id), every event naming a target in REF_FIELDS, and every old key_conflict (no
+    id, written before ids were added to it) whose text excerpt is a prefix of a
+    purged text, with no minimum length. Every other line is kept unchanged."""
+    rids = _record_ids(lines)
+    texts = {rid: [] for rid in targets}
+    for i, (_n, _raw, ev) in enumerate(lines):
+        if ev is None:
+            continue
+        rid = rids[i] if rids[i] in targets else ev.get("id")
+        t = ev.get("text")
+        if (
+            rid in texts
+            and isinstance(t, str)
+            and _promote(ev).get("op", "add") in ("add", "update")
+        ):
+            if t not in texts[rid]:
+                texts[rid].append(t)
+    purged = [t for ts in texts.values() for t in ts if t]
+    kept, kept_ids = [], set()
+    for i, (_n, raw, ev) in enumerate(lines):
+        if ev is not None:
+            if rids[i] in targets:
+                continue
+            if any(isinstance(ev.get(f), str) and ev.get(f) in targets for f in REF_FIELDS):
+                continue
+            ex = ev.get("text")  # only old key_conflict events carry one
+            if (
+                ev.get("op") == "key_conflict"
+                and isinstance(ex, str)
+                and ex
+                and any(t.startswith(ex) for t in purged)
+            ):
+                continue
+            if rids[i] is not None:
+                kept_ids.add(rids[i])
+        kept.append(raw)
+    return kept, texts, kept_ids
+
+
+def text_forms(text):
+    """The forms a text takes on disk: raw, and JSON-escaped with ensure_ascii True
+    and False (quotes removed). They cover escaped non-ASCII text, quotes,
+    backslashes and newlines."""
+    out = [text, json.dumps(text)[1:-1], json.dumps(text, ensure_ascii=False)[1:-1]]
+    return [f for i, f in enumerate(out) if f and f not in out[:i]]
+
+
+def _string_head(s):
+    """The JSON string body at the start of s, up to an unescaped quote or the end
+    (a torn line may cut it short)."""
+    out, i = [], 0
+    while i < len(s):
+        c = s[i]
+        if c == "\\":
+            out.append(s[i : i + 2])
+            i += 2
+            continue
+        if c == '"':
+            break
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _holds_purged(line, forms, windows):
+    m = _TEXT_FIELD.search(line)
+    if m:
+        head = _string_head(line[m.end() :])
+        if head and any(f.startswith(head) for f in forms):
+            return True
+    return any(w in line for w in windows)
+
+
+def _scrub_side_files(path, texts):
+    """Drop from <oplog>.torn and <oplog>.corrupt every line holding a purged text: a line with a "text" field whose
+    string, maybe truncated, is a prefix of a purged text (no minimum length), and
+    any line holding a 20-character substring of one. Texts are matched in all
+    text_forms. Returns the number of lines dropped. Caller holds the lock."""
+    forms = [f for t in texts for f in text_forms(t)]
+    if not forms:
+        return 0
+    windows = {f[i : i + _WINDOW] for f in forms for i in range(len(f) - _WINDOW + 1)}
+    dropped = 0
+    for suffix in (TORN_SUFFIX, CORRUPT_SUFFIX):
+        side = path + suffix
+        if not os.path.exists(side):
+            continue
+        with open(side, "rb") as f:
+            data = f.read()
+        pieces = data.split(b"\n")
+        if data.endswith(b"\n") or not data:
+            pieces = pieces[:-1]
+        kept = []
+        for raw in pieces:
+            # "text" and the windows are searched anywhere in the line, so the
+            # "<line number><TAB>" prefix of a .corrupt line needs no stripping
+            line = raw.decode("utf-8", "replace")
+            if _holds_purged(line, forms, windows):
+                dropped += 1
+            else:
+                kept.append(raw)
+        if len(kept) == len(pieces):
+            continue
+        if not kept:
+            os.remove(side)
+            continue
+        tmp = side + ".tmp"
+        with open(tmp, "wb") as f:
+            for raw in kept:
+                f.write(raw + b"\n")
+        os.replace(tmp, side)
+    return dropped
+
+
+def _marker_id(rid):
+    """The id a purge marker records. An old-format line without an id only has a
+    positional replay id (_auto<n>); once its line is gone the next id-less line
+    takes that number, so a marker naming it would redact the wrong record on
+    replay. Such a marker names no id."""
+    return None if isinstance(rid, str) and re.fullmatch(r"_auto\d+", rid) else rid
+
+
+def _digests(texts):
+    return [hashlib.sha256(t.encode("utf-8")).hexdigest() for t in texts]
 
 
 # F3c: signal running servers. Suffix must match amem/serve_common.PURGE_EPOCH_SUFFIX.
@@ -297,19 +740,6 @@ def _purge_hooks():
     return out
 
 
-def _text_digests(events, ids):
-    """{id: [sha256 of each distinct add/update text]} for the purged ids."""
-    out = {rid: [] for rid in ids}
-    for ev in events:
-        rid = ev.get("id")
-        text = ev.get("text")
-        if rid in out and ev.get("op") in ("add", "update") and isinstance(text, str):
-            h = hashlib.sha256(text.encode("utf-8")).hexdigest()
-            if h not in out[rid]:
-                out[rid].append(h)
-    return out
-
-
 def run_purge_hooks(oplog_path, purged, match=None):
     """Call every installed post-purge hook. Never raises; returns
     [{"hook": name, "ok": bool, "result" or "error": ...}]."""
@@ -325,23 +755,27 @@ def run_purge_hooks(oplog_path, purged, match=None):
     return results
 
 
-def erase(path, pattern, hard=False):
+def erase(path, pattern, hard=False, drop_attest=False):
     """GDPR right-to-erasure. soft: append forget events (auditable, text retained).
-    hard: rewrite the log dropping the matched records' content entirely; log a purge
-    marker; then run the post-purge hooks (also when nothing matched, so a re-run
-    finishes a cleanup a failed hook left undone)."""
-    events = read_log(path)
+    hard: rewrite the log dropping the matched records' content entirely (see
+    _purge_plan; also .torn, .corrupt and .vec); log a purge marker holding
+    HMAC-SHA256 of the pattern with <data dir>/.erasure_key; then run the post-purge
+    hooks (also when nothing matched, so a re-run finishes a cleanup a failed hook
+    left undone). A hard erase refuses while <oplog>.attest.jsonl exists, unless
+    drop_attest. The read and the write hold <path>.lock; a hard purge keeps every
+    other line byte for byte; hooks run after the lock is released."""
     regex = re.compile(pattern, re.I)
-    targets = set(_match_ids(events, pattern))
-    if not targets and not hard:
-        return {"matched": 0, "mode": "soft", "ids": []}
-    if not targets:
-        hooks = run_purge_hooks(path, {}, lambda text: bool(regex.search(text or "")))
-        return {"matched": 0, "mode": "hard", "ids": [], "hooks": hooks}
-    if not hard:
-        with open(path, "a", encoding="utf-8") as f:
-            for rid in targets:
-                f.write(
+    with oplog_lock(path):
+        attest_dropped = _attest_guard(path, drop_attest) if hard else False
+        lines = _load_lines(path)
+        events = [_promote(ev) for _n, _raw, ev in lines if ev is not None]
+        targets = set(_match_ids(events, pattern))
+        if not targets and not hard:
+            return {"matched": 0, "mode": "soft", "ids": []}
+        if not hard:
+            _append_lines(
+                path,
+                [
                     json.dumps(
                         {
                             "op": "forget",
@@ -350,90 +784,148 @@ def erase(path, pattern, hard=False):
                             "created_at": time.time(),
                         }
                     )
-                    + "\n"
-                )
-        _bump_epoch(path)  # F3c
-        return {"matched": len(targets), "mode": "soft", "ids": sorted(targets)}
-    # hard purge: filter out add/update/supersede/forget for targets; keep a purge audit marker
-    kept = [
-        ev
-        for ev in events
-        if ev.get("id") not in targets and ev.get("a") not in targets and ev.get("b") not in targets
-    ]
-    for rid in sorted(targets):
-        kept.append(
-            {
-                "op": "purge",
-                "id": rid,
-                "reason": "erasure:sha256:" + hashlib.sha256(pattern.encode()).hexdigest(),
-                "created_at": time.time(),
-                "note": "content removed for compliance",
-            }
-        )
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        for ev in kept:
-            f.write(json.dumps(ev, ensure_ascii=False) + "\n")
-    os.replace(tmp, path)
-    _bump_epoch(path)  # F3c
-    n_vec = _purge_vec(path, targets)  # F3a: erase the embeddings too
-    hooks = run_purge_hooks(
-        path, _text_digests(events, targets), lambda text: bool(regex.search(text or ""))
-    )
-    return {
-        "matched": len(targets),
-        "mode": "hard",
-        "ids": sorted(targets),
-        "vec_purged": n_vec,
-        "hooks": hooks,
-    }
-
-
-def retention(path, max_age_days=None, max_active=None, hard=False):
-    events = read_log(path)
-    rec, order = replay(events)
-    now = time.time()
-    doomed = []
-    if max_age_days is not None:
-        cut = now - max_age_days * 86400
-        doomed += [
-            rid
-            for rid, record in rec.items()
-            if record["status"] == "active" and (record.get("created_at") or now) < cut
-        ]
-    if max_active is not None:
-        active = [rid for rid in order if rec[rid]["status"] == "active"]
-        if len(active) > max_active:
-            doomed += active[: len(active) - max_active]  # oldest first
-    doomed = sorted(set(doomed))
-    if not doomed:
-        if hard:
-            return {"retired": 0, "mode": "hard", "hooks": run_purge_hooks(path, {}, None)}
-        return {"retired": 0, "mode": "soft"}
-    if hard:
-        kept = [ev for ev in events if ev.get("id") not in set(doomed)]
-        for rid in doomed:
-            kept.append({"op": "purge", "id": rid, "reason": "retention", "created_at": now})
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            for ev in kept:
-                f.write(json.dumps(ev, ensure_ascii=False) + "\n")
-        os.replace(tmp, path)
-        _bump_epoch(path)  # F3c
-        _purge_vec(path, set(doomed))  # F3a: erase the embeddings too
-        hooks = run_purge_hooks(path, _text_digests(events, doomed), None)
-        return {"retired": len(doomed), "mode": "hard", "ids": doomed, "hooks": hooks}
+                    for rid in targets
+                ],
+            )
+            _bump_epoch(path)  # F3c
+            return {"matched": len(targets), "mode": "soft", "ids": sorted(targets)}
+        n_vec, n_side, digests = 0, 0, {}
+        if targets:
+            kept, texts, kept_ids = _purge_plan(lines, targets)
+            mark = "erasure:hmac-sha256:" + _hmac_hex(path, pattern)
+            markers = [
+                {
+                    "op": "purge",
+                    "id": _marker_id(rid),
+                    "reason": mark,
+                    "created_at": time.time(),
+                    "note": "content removed for compliance",
+                }
+                for rid in sorted(targets)
+            ]
+            _rewrite(path, kept, markers)
+            _bump_epoch(path)  # F3c
+            n_vec = _purge_vec(path, targets, keep_ids=kept_ids)  # F3a: the embeddings too
+            n_side = _scrub_side_files(path, [t for ts in texts.values() for t in ts])
+            digests = {rid: _digests(ts) for rid, ts in texts.items()}
+    hooks = run_purge_hooks(path, digests, lambda text: bool(regex.search(text or "")))
+    if not targets:
+        out = {"matched": 0, "mode": "hard", "ids": [], "hooks": hooks}
     else:
-        with open(path, "a", encoding="utf-8") as f:
-            for rid in doomed:
-                f.write(
+        out = {
+            "matched": len(targets),
+            "mode": "hard",
+            "ids": sorted(targets),
+            "vec_purged": n_vec,
+            "side_lines_purged": n_side,
+            "hooks": hooks,
+        }
+    if attest_dropped:
+        out["attest_dropped"] = True
+    return out
+
+
+def retention(path, max_age_days=None, max_active=None, hard=False, drop_attest=False):
+    """Retire by age and/or active-count window. A hard purge follows the same rules
+    as a hard erase (_purge_plan, side files, attest guard). The read and the write
+    hold <path>.lock; a hard purge keeps every other line byte for byte; hooks run
+    after the lock is released."""
+    with oplog_lock(path):
+        attest_dropped = _attest_guard(path, drop_attest) if hard else False
+        lines = _load_lines(path)
+        events = [_promote(ev) for _n, _raw, ev in lines if ev is not None]
+        rec, order = replay(events)
+        now = time.time()
+        doomed = []
+        if max_age_days is not None:
+            cut = now - max_age_days * 86400
+            doomed += [
+                rid
+                for rid, record in rec.items()
+                if record["status"] == "active" and (record.get("created_at") or now) < cut
+            ]
+        if max_active is not None:
+            active = [rid for rid in order if rec[rid]["status"] == "active"]
+            if len(active) > max_active:
+                doomed += active[: len(active) - max_active]  # oldest first
+        doomed = sorted(set(doomed))
+        digests = {}
+        if not doomed:
+            if not hard:
+                return {"retired": 0, "mode": "soft"}
+        elif hard:
+            gone = set(doomed)
+            kept, texts, kept_ids = _purge_plan(lines, gone)
+            markers = [
+                {"op": "purge", "id": _marker_id(rid), "reason": "retention", "created_at": now}
+                for rid in doomed
+            ]
+            _rewrite(path, kept, markers)
+            _bump_epoch(path)  # F3c
+            _purge_vec(path, gone, keep_ids=kept_ids)  # F3a: the embeddings too
+            _scrub_side_files(path, [t for ts in texts.values() for t in ts])
+            digests = {rid: _digests(ts) for rid, ts in texts.items()}
+        else:
+            _append_lines(
+                path,
+                [
                     json.dumps(
                         {"op": "forget", "id": rid, "reason": "retention", "created_at": now}
                     )
-                    + "\n"
-                )
-        _bump_epoch(path)  # F3c
-    return {"retired": len(doomed), "mode": "hard" if hard else "soft", "ids": doomed}
+                    for rid in doomed
+                ],
+            )
+            _bump_epoch(path)  # F3c
+            return {"retired": len(doomed), "mode": "soft", "ids": doomed}
+    hooks = run_purge_hooks(path, digests, None)
+    out = {"retired": 0, "mode": "hard", "hooks": hooks}
+    if doomed:
+        out = {"retired": len(doomed), "mode": "hard", "ids": doomed, "hooks": hooks}
+    if attest_dropped:
+        out["attest_dropped"] = True
+    return out
+
+
+def repair(path, apply=False):
+    """Quarantine bad lines. Dry run by default: report each bad line by number
+    and category, never its content. apply: under <path>.lock, move each bad
+    line unchanged to <path>.corrupt as "<line number><TAB><line>", move a torn
+    tail to <path>.torn, and keep every other line byte for byte, in order."""
+    with oplog_lock(path):
+        with open(path, "rb") as f:
+            data = f.read()
+        pieces = data.split(b"\n")
+        terminated = data.endswith(b"\n") or not data
+        if terminated:
+            pieces = pieces[:-1]
+        bad = []
+        for i, raw in enumerate(pieces, 1):
+            cat, _ev = classify(raw)
+            if i == len(pieces) and not terminated and cat is not None:
+                bad.append((i, "torn_tail"))
+            elif cat in ("invalid_json", "not_object"):
+                bad.append((i, cat))
+        result = {
+            "oplog": path,
+            "bad_lines": [{"line": i, "category": c} for i, c in bad],
+            "applied": False,
+        }
+        if apply and bad:
+            corrupt = [(i, pieces[i - 1]) for i, c in bad if c != "torn_tail"]
+            torn = [pieces[i - 1] for i, c in bad if c == "torn_tail"]
+            if corrupt:
+                with open(path + CORRUPT_SUFFIX, "ab") as f:
+                    for i, raw in corrupt:
+                        f.write(str(i).encode("ascii") + b"\t" + raw + b"\n")
+            if torn:
+                with open(path + TORN_SUFFIX, "ab") as f:
+                    for raw in torn:
+                        f.write(raw + b"\n")
+            gone = {i for i, _c in bad}
+            _rewrite(path, [raw for i, raw in enumerate(pieces, 1) if i not in gone], [])
+            _bump_epoch(path)  # F3c: running servers reload
+            result["applied"] = True
+    return result
 
 
 def summary(events):
@@ -516,6 +1008,7 @@ def main(argv=None):
             "summary",
             "attest",
             "verify-chain",
+            "repair",
         ],
     )
     parser.add_argument("oplog", nargs="?")
@@ -528,17 +1021,43 @@ def main(argv=None):
     parser.add_argument("--key")
     parser.add_argument("--keyfile")
     parser.add_argument("--selftest", action="store_true")
+    parser.add_argument("--quarantine-bad-lines", action="store_true")
+    parser.add_argument("--apply", action="store_true")
+    parser.add_argument("--drop-attest", action="store_true")
     args = parser.parse_args(argv)
 
     if args.selftest:
         return _selftest()
     if not args.cmd or not args.oplog:
         sys.exit(
-            "usage: amem_governance.py {audit|lineage|conflicts|erase|retention|summary} <oplog.jsonl> [...]"
+            "usage: amem_governance.py {audit|lineage|conflicts|erase|retention|summary|repair} <oplog.jsonl> [...]"
         )
     if not os.path.exists(args.oplog):
         sys.exit(f"op-log not found: {args.oplog}")
-    events = read_log(args.oplog)
+    if args.cmd == "repair":
+        if not args.quarantine_bad_lines:
+            sys.exit("repair needs --quarantine-bad-lines (the only repair mode)")
+        r = repair(args.oplog, apply=args.apply)
+        print(json.dumps(r, ensure_ascii=False))
+        for b in r["bad_lines"]:  # numbers and categories only, never the content
+            print(f"  line {b['line']}: {b['category']}")
+        if not r["bad_lines"]:
+            print("  no bad lines")
+        elif r["applied"]:
+            print(
+                f"  moved: torn tail -> {args.oplog}{TORN_SUFFIX}, other bad lines -> {args.oplog}{CORRUPT_SUFFIX}"
+            )
+        else:
+            print("  dry run: nothing changed; add --apply to move these lines out of the op-log")
+        return 0
+    try:
+        # verify-chain reads a chain file, not an op-log: never repair it, and any
+        # bad line is evidence of tampering
+        events = read_log(args.oplog, repair=args.cmd != "verify-chain")
+    except OplogError as e:
+        if args.cmd == "verify-chain":
+            sys.exit(f"TAMPER DETECTED at line {e.lineno}: not a JSON object ({e.category})")
+        sys.exit(str(e))
 
     if args.cmd in ("attest", "verify-chain"):
         try:
@@ -599,9 +1118,11 @@ def main(argv=None):
         if not args.match:
             sys.exit("--match <regex> required")
         try:
-            record = erase(args.oplog, args.match, hard=args.hard)
+            record = erase(args.oplog, args.match, hard=args.hard, drop_attest=args.drop_attest)
         except re.error as e:
             sys.exit(f"invalid --match regex: {e}")
+        except (OplogError, AttestPresent) as e:
+            sys.exit(str(e))
         print(json.dumps(record, ensure_ascii=False, default=str))
         if not record["matched"]:  # never echo the pattern: it may be the text to erase
             print("  NO MATCH: no record matched --match; the op-log was not changed")
@@ -613,7 +1134,16 @@ def main(argv=None):
             print("  SOFT forget (auditable; text retained in log)")
         return _print_hooks(record, args.hard)
     elif args.cmd == "retention":
-        record = retention(args.oplog, args.max_age_days, args.max_active, hard=args.hard)
+        try:
+            record = retention(
+                args.oplog,
+                args.max_age_days,
+                args.max_active,
+                hard=args.hard,
+                drop_attest=args.drop_attest,
+            )
+        except (OplogError, AttestPresent) as e:
+            sys.exit(str(e))
         print(json.dumps(record, ensure_ascii=False, default=str))
         return _print_hooks(record, args.hard)
     return 0

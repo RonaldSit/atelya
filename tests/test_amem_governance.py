@@ -71,11 +71,88 @@ def logfile(tmp_path):
 
 
 # ================================ read_log ========================================
-def test_read_log_skips_malformed_and_blank(tmp_path):
+def test_read_log_skips_blank_lines(tmp_path):
     p = tmp_path / "ops.jsonl"
-    p.write_text('{"op":"add","id":"x","text":"ok"}\n\n{{{not json\n', encoding="utf-8")
+    p.write_text('{"op":"add","id":"x","text":"ok"}\n\n   \n', encoding="utf-8")
     evs = gov.read_log(str(p))
     assert len(evs) == 1 and evs[0]["id"] == "x"
+
+
+@pytest.mark.parametrize(
+    "bad,category",
+    [
+        ('{"op": "add", "text": "secret-xyz', "invalid_json"),
+        ("[1, 2]", "not_object"),
+        ("42", "not_object"),
+        ('"a string"', "not_object"),
+        ("null", "not_object"),
+    ],
+)
+def test_read_log_refuses_a_bad_line_and_names_it(tmp_path, bad, category):
+    # the op-log is the source of truth: a bad line is never skipped silently
+    p = tmp_path / "ops.jsonl"
+    data = '{"op":"add","id":"x","text":"ok"}\n' + bad + '\n{"op":"add","id":"y","text":"ok"}\n'
+    p.write_text(data, encoding="utf-8")
+    with pytest.raises(ValueError) as err:
+        gov.read_log(str(p))
+    assert (
+        getattr(err.value, "lineno", None) == 2 and getattr(err.value, "category", None) == category
+    )
+    assert "repair --quarantine-bad-lines" in str(err.value) and "secret-xyz" not in str(err.value)
+    assert p.read_text(encoding="utf-8") == data  # nothing changed
+
+
+def test_read_log_moves_a_torn_tail_to_dot_torn(tmp_path):
+    p = tmp_path / "ops.jsonl"
+    head = '{"op":"add","id":"x","text":"ok"}\n'
+    p.write_bytes((head + '{"op":"add","id":"y","te').encode())
+    assert [e["id"] for e in gov.read_log(str(p))] == ["x"]
+    assert p.read_bytes() == head.encode()
+    assert (tmp_path / "ops.jsonl.torn").read_bytes() == b'{"op":"add","id":"y","te\n'
+
+
+def test_erase_hard_keeps_every_other_line_byte_for_byte(tmp_path):
+    lines = [
+        '{"op":"add","id":"k","text":"keep me","key":null,"created_at":1.0}',
+        "",
+        '{"text": "legacy keeper"}',
+        '{"op": "add", "id": "z", "text": "erase zebra", "key": null, "created_at": 2.0}',
+    ]
+    p = tmp_path / "ops.jsonl"
+    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    assert gov.erase(str(p), "zebra", hard=True)["ids"] == ["z"]
+    out = p.read_text(encoding="utf-8")
+    assert out.startswith("\n".join(lines[:3]) + "\n") and "zebra" not in out
+
+
+def test_erase_hard_refuses_a_bad_middle_line_and_changes_nothing(tmp_path):
+    p = tmp_path / "ops.jsonl"
+    data = (
+        '{"op":"add","id":"x","text":"ok"}\nnot json\n{"op":"add","id":"z","text":"erase zebra"}\n'
+    )
+    p.write_text(data, encoding="utf-8")
+    with pytest.raises(ValueError):
+        gov.erase(str(p), "zebra", hard=True)
+    assert p.read_text(encoding="utf-8") == data
+
+
+def test_appends_take_the_oplog_lock(logfile):
+    gov.erase(logfile, "Airbus", hard=False)
+    assert os.path.exists(logfile + ".lock")
+
+
+def test_cli_repair_dry_run_then_apply(tmp_path, capsys):
+    p = tmp_path / "ops.jsonl"
+    good, bad = '{"op":"add","id":"x","text":"ok"}', '{"op": "add", "text": "secret-xyz'
+    p.write_text(good + "\n" + bad + "\n" + good.replace('"x"', '"y"') + "\n", encoding="utf-8")
+    assert gov.main(["repair", "--quarantine-bad-lines", str(p)]) == 0
+    out = capsys.readouterr().out
+    assert "line 2: invalid_json" in out and "secret-xyz" not in out
+    assert not (tmp_path / "ops.jsonl.corrupt").exists()
+    assert gov.main(["repair", "--quarantine-bad-lines", "--apply", str(p)]) == 0
+    assert "secret-xyz" not in capsys.readouterr().out
+    assert (tmp_path / "ops.jsonl.corrupt").read_text(encoding="utf-8") == "2\t" + bad + "\n"
+    assert [e["id"] for e in gov.read_log(str(p))] == ["x", "y"]
 
 
 def test_read_log_legacy_text_promoted_to_add(tmp_path):
@@ -197,10 +274,17 @@ def test_erase_hard_removes_content_logs_purge_and_resurrects_predecessor(logfil
     purge = evs[-1]
     assert purge["op"] == "purge" and purge["id"] == "b"
     assert purge["note"] == "content removed for compliance"  # the purge itself is logged
-    # the marker's reason is a SHA-256 digest of the pattern — verifiable, never leaks it
+    # the marker's reason is HMAC-SHA256 of the pattern with the data dir's erasure key:
+    # checkable with the key, and a short pattern cannot be confirmed by hashing guesses
     import hashlib as _h
+    import hmac as _hm
 
-    assert purge["reason"] == "erasure:sha256:" + _h.sha256(b"Airbus").hexdigest()
+    key = open(os.path.join(os.path.dirname(logfile), ".erasure_key"), "rb").read()
+    assert len(key) == 32
+    assert (
+        purge["reason"] == "erasure:hmac-sha256:" + _hm.new(key, b"Airbus", _h.sha256).hexdigest()
+    )
+    assert _h.sha256(b"Airbus").hexdigest() not in open(logfile, encoding="utf-8").read()
     assert not any(e.get("op") == "flag" for e in evs)  # erase-hard drops referencing flags
     rec, _ = gov.replay(evs)
     assert "b" not in rec  # purge marker alone creates no record
@@ -228,15 +312,15 @@ def test_retention_max_active_retires_oldest_first(tmp_path):
     assert rec["m3"]["status"] == "active"
 
 
-def test_retention_hard_rewrites_but_keeps_flag_rows(logfile):
+def test_retention_hard_rewrites_and_drops_flag_rows(logfile):
     r = gov.retention(logfile, max_age_days=1, hard=True)
     assert r["retired"] == 1 and r["mode"] == "hard"
     raw = open(logfile, encoding="utf-8").read()
     assert "Airbus" not in raw
     evs = gov.read_log(logfile)
     assert any(e.get("op") == "purge" and e.get("reason") == "retention" for e in evs)
-    # asymmetry vs erase-hard: retention filters by id only, so the flag row survives
-    assert any(e.get("op") == "flag" for e in evs)
+    # one rule for erase and retention: every event naming a purged id goes
+    assert not any(e.get("op") == "flag" for e in evs)
 
 
 # ================================= summary ========================================
@@ -458,3 +542,159 @@ def test_cli_retention_with_nothing_due_says_nothing_was_purged(logfile, monkeyp
     out = capsys.readouterr().out
     assert '"retired": 0' in out
     assert "nothing was purged" in out and "were purged" not in out
+
+
+# ============================ events carry no content ============================
+def _lines(path):
+    return [json.loads(x) for x in open(path, encoding="utf-8") if x.strip()]
+
+
+def test_hard_erase_removes_every_event_naming_a_purged_id(tmp_path):
+    p = write_log(
+        tmp_path / "ops.jsonl",
+        [
+            {
+                "op": "add",
+                "id": "h",
+                "text": "employer: Northwind",
+                "key": "employer",
+                "created_at": 1.0,
+            },
+            {
+                "op": "add",
+                "id": "x",
+                "text": "zephyr budget for the bluebird team",
+                "key": None,
+                "created_at": 2.0,
+            },
+            {
+                "op": "key_conflict",
+                "id": "x",
+                "holder": "h",
+                "key": "employer",
+                "reason": "unrelated",
+            },
+            {"op": "flag", "a": "h", "b": "x", "why": "numeric_mismatch"},
+            {"op": "forget", "id": "x", "reason": "erasure:/zephyr/"},
+        ],
+    )
+    gov.erase(p, "zephyr", hard=True)
+    assert [e["op"] for e in _lines(p)] == [
+        "add",
+        "purge",
+    ]  # key_conflict, flag and forget went too
+
+
+def test_hard_erase_of_the_holder_removes_the_key_conflict_naming_it(tmp_path):
+    p = write_log(
+        tmp_path / "ops.jsonl",
+        [
+            {
+                "op": "add",
+                "id": "h",
+                "text": "employer: Northwind",
+                "key": "employer",
+                "created_at": 1.0,
+            },
+            {"op": "add", "id": "x", "text": "an unrelated note", "key": None, "created_at": 2.0},
+            {
+                "op": "key_conflict",
+                "id": "x",
+                "holder": "h",
+                "key": "employer",
+                "reason": "unrelated",
+            },
+        ],
+    )
+    gov.erase(p, "Northwind", hard=True)
+    assert [e["op"] for e in _lines(p)] == ["add", "purge"]
+
+
+def test_legacy_key_conflict_excerpt_goes_by_prefix_even_when_short(tmp_path):
+    p = write_log(
+        tmp_path / "ops.jsonl",
+        [
+            {"op": "add", "id": "p", "text": "Priya Raman", "key": None, "created_at": 1.0},
+            {
+                "op": "key_conflict",
+                "key": "program_manager",
+                "reason": "fragment",
+                "text": "Priya Raman",
+            },
+        ],
+    )
+    gov.erase(p, "Priya", hard=True)
+    assert "Priya" not in open(p, encoding="utf-8").read()
+
+
+def test_idless_old_format_lines_are_purgeable_one_after_another(tmp_path):
+    p = write_log(
+        tmp_path / "ops.jsonl",
+        [
+            {"text": "Priya Raman"},
+            {"text": "a quokka note"},
+            {"op": "add", "id": "k", "text": "keep"},
+        ],
+    )
+    assert gov.erase(p, "Priya", hard=True)["matched"] == 1
+    # the marker names no id: a positional _auto<n> would redact the next id-less line on replay
+    assert [e.get("id") for e in _lines(p) if e.get("op") == "purge"] == [None]
+    assert gov.erase(p, "quokka", hard=True)["matched"] == 1
+    raw = open(p, encoding="utf-8").read()
+    assert "Priya" not in raw and "quokka" not in raw and '"keep"' in raw
+
+
+def test_hard_erase_scrubs_torn_and_corrupt_in_every_text_form(tmp_path):
+    text = "陳大文的密碼是 zephyr bluebird 2026,請勿外流"
+    p = write_log(tmp_path / "ops.jsonl", [{"op": "add", "id": "c", "text": text, "key": None}])
+    esc, raw8 = json.dumps(text)[1:-1], json.dumps(text, ensure_ascii=False)[1:-1]
+    (tmp_path / "ops.jsonl.torn").write_text(
+        '{"op": "add", "id": "t", "text": "' + esc[:23] + "\n", encoding="utf-8"
+    )
+    (tmp_path / "ops.jsonl.corrupt").write_text(
+        '4\t{"op": "note", "body": "'
+        + raw8
+        + "\n"
+        + '7\t{"op": "add", "text": "unrelated keeper\n',
+        encoding="utf-8",
+    )
+    r = gov.erase(p, "zephyr", hard=True)
+    assert r["side_lines_purged"] == 2
+    assert not (tmp_path / "ops.jsonl.torn").exists()
+    assert (tmp_path / "ops.jsonl.corrupt").read_text(
+        encoding="utf-8"
+    ) == '7\t{"op": "add", "text": "unrelated keeper\n'
+
+
+def test_hard_erase_drops_vec_lines_the_op_log_no_longer_names(tmp_path):
+    p = write_log(
+        tmp_path / "ops.jsonl", [{"op": "add", "id": "k", "text": "keep"}, {"text": "erase me"}]
+    )
+    with open(p + ".vec", "w", encoding="utf-8") as f:
+        for vid in ("k", "random-id-1", "random-id-2"):
+            f.write(json.dumps({"id": vid, "model": "m", "vec": ""}) + "\n")
+    gov.erase(p, "erase me", hard=True)
+    assert [e["id"] for e in _lines(p + ".vec")] == ["k"]
+
+
+def test_hard_purge_refuses_while_the_attest_chain_exists(logfile, capsys):
+    assert gov.main(["attest", logfile]) == 0
+    before = open(logfile, encoding="utf-8").read()
+    with pytest.raises(ValueError, match="--drop-attest"):
+        gov.erase(logfile, "Airbus", hard=True)
+    with pytest.raises(ValueError, match="--drop-attest"):
+        gov.retention(logfile, max_active=0, hard=True)
+    assert open(logfile, encoding="utf-8").read() == before
+    r = gov.erase(logfile, "Airbus", hard=True, drop_attest=True)
+    assert r["matched"] == 1 and r["attest_dropped"] is True
+    assert not os.path.exists(logfile + ".attest.jsonl")
+
+
+def test_erasure_key_is_0600_and_survives_erase_and_retention(logfile):
+    gov.erase(logfile, "Airbus", hard=True)
+    kp = os.path.join(os.path.dirname(logfile), ".erasure_key")
+    key = open(kp, "rb").read()
+    assert len(key) == 32 and (os.name == "nt" or (os.stat(kp).st_mode & 0o777) == 0o600)
+    gov.retention(logfile, max_active=0, hard=True)
+    gov.erase(logfile, "Boeing", hard=False)
+    assert open(kp, "rb").read() == key
