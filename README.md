@@ -24,11 +24,9 @@ pip install atelya-attest
 No install is required either: the tools are stdlib-only and run straight from
 a clone (`python3 amem_attest.py --help`).
 
-This README describes `main`. `pip install` gives 0.1.1 (2026-07-16), which
-predates everything under *Unreleased* in [CHANGELOG.md](CHANGELOG.md)
-(HMAC erasure markers, hard-purge reach, the attest-chain guard, strict
-op-log parsing, post-purge hooks); until the next release, run those from a
-clone.
+0.2.0 (2026-11-04) adds HMAC erasure markers, hard-purge reach, the
+attest-chain guard, strict op-log parsing with `repair`, and post-purge hooks,
+and fixes option order on older Pythons; see [CHANGELOG.md](CHANGELOG.md).
 
 ## 60-second proof
 
@@ -219,12 +217,12 @@ their machines. → `ronald@atelyaos.com`
 
 ## Roadmap
 
-- [x] PyPI package (`pip install atelya-attest`) — **0.1.1 published**
+- [x] PyPI package (`pip install atelya-attest`) — release **0.2.0** (2026-11-04)
 - [x] External anchor ledger with monotonic/consistency checks
-- [x] Erasure markers that never hold the literal pattern (HMAC-SHA-256 with a per-data-directory key on `main`; plain SHA-256 in 0.1.1)
+- [x] Erasure markers that never hold the literal pattern (HMAC-SHA-256 with a per-data-directory key since 0.2.0; plain SHA-256 in 0.1.x)
 - [ ] Optional Ed25519 / ML-DSA signing (stdlib HMAC stays the default)
 - [x] Live-store invalidation after hard-erase: post-purge hooks
-  (`atelya.purge_hooks`, on `main`, not in 0.1.1); engine 0.3.0 uses them to
+  (`atelya.purge_hooks`, since 0.2.0); engine 0.3.0 uses them to
   clean its session and memory-tool files, and its running servers reload the
   store when the purge epoch file changes. GPU KV caches built from erased
   text are not covered.

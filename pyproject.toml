@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "atelya-attest"
-version = "0.1.1"
+version = "0.2.0"
 description = "Tamper-evident audit trail for AI-agent memory — hash-chained attestation + transparency-log checkpoints (RFC 6962 / C2SP pattern). Zero dependencies."
 readme = "README.md"
 license = "Apache-2.0"

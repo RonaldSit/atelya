@@ -4,7 +4,7 @@ All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) ·
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0] — 2026-11-04
 
 The changes below fix residue that a hard `erase` or hard `retention` left
 behind. Before, a hard purge removed the record's own lines but could leave
