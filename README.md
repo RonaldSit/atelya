@@ -24,6 +24,12 @@ pip install atelya-attest
 No install is required either: the tools are stdlib-only and run straight from
 a clone (`python3 amem_attest.py --help`).
 
+This README describes `main`. `pip install` gives 0.1.1 (2026-07-16), which
+predates everything under *Unreleased* in [CHANGELOG.md](CHANGELOG.md)
+(HMAC erasure markers, hard-purge reach, the attest-chain guard, strict
+op-log parsing, post-purge hooks); until the next release, run those from a
+clone.
+
 ## 60-second proof
 
 ```bash
@@ -45,7 +51,7 @@ atelya-govern verify-chain chain.jsonl
 | Verify integrity | `atelya-govern verify-chain` | a single flipped byte fails **at the exact record**, exit 1 |
 | Keyed chains | `--key / --keyfile / $ENV` (HMAC-SHA-256) | wrong key fails; **empty/whitespace keys are refused** — no silent HMAC→SHA-256 downgrade |
 | External anchoring | `atelya-anchor anchor / check / latest` | rewrite-and-rechain attacks surface as **ANCHOR CONFLICT**; a forgotten `--label` **fails loudly and lists what exists** instead of silently passing |
-| GDPR erasure | `atelya-govern erase [--hard]` | soft = auditable forget (text retained); hard = content gone, marker records only a **SHA-256 digest** of the pattern — the erasure is provable, the secret never leaks |
+| GDPR erasure | `atelya-govern erase [--hard]` | soft = auditable forget (text retained); hard = the record and every event naming it removed from the op-log and its side files, marker records only an **HMAC-SHA-256** of the pattern (key in `<data_dir>/.erasure_key`) — the erasure is recorded, and without the key the pattern cannot be confirmed by hashing guesses; refuses while the default attest chain exists (see *Guarantees*) |
 | Audit views | `audit / lineage / conflicts / summary` | full timeline, one record's life, flagged contradictions |
 | Retention | `retention --max-age / --max-active` | age/cap-based retirement, logged like everything else |
 | Post-purge hooks | entry-point group `atelya.purge_hooks` | after every hard erase/retention, each installed hook gets the purged ids, **SHA-256 digests** of their texts and (erase only) the matcher — never the text — so a product can remove its own copies; the CLI prints every hook's outcome (or that none is installed) and exits 1 if one failed |
@@ -119,17 +125,25 @@ separation of duties is what turns "detects accidents" into "detects insiders".
   controls, and rewrite-resistance needs the external anchor (shipped).
 - A forgotten `--label` on `check` is treated as an operator error, not a
   pass: the tool fails and lists the labels the ledger actually holds.
-- Hard-erase removes content but never the fact of erasure — the purge event
-  itself is chained.
+- Hard-erase removes the record from the op-log and its side files but never
+  the fact of erasure: a purge marker (an HMAC of the pattern, never the
+  text) stays in the op-log. The chain stores every event verbatim, so a hard
+  purge refuses while the default chain file (`<oplog>.attest.jsonl`) exists;
+  `--drop-attest` deletes it, with the history it recorded. A chain built
+  after the purge starts again from GENESIS, so checking it against a root
+  anchored before the purge reports ANCHOR CONFLICT, as for any rewrite.
+  Chains written elsewhere with `--out` are neither checked nor cleaned. A
+  chain that stores only hashes and can be verified across purged positions
+  (attest v2) is not implemented.
 - Trust boundary: the verifier is ~200 lines of stdlib Python. Don't trust
   this repo — read it, or rewrite it.
 
 ## Verify it yourself
 
-From a clone (the 63-test suite lives here, not in the wheel):
+From a clone (the 93-test suite lives here, not in the wheel):
 
 ```bash
-python -m pytest tests/ -q      # 63 tests: known-answer vectors, tz-matrix,
+python -m pytest tests/ -q      # 93 tests: known-answer vectors, tz-matrix,
                                 # tamper/reorder/truncation, erasure semantics
 atelya-attest --selftest && atelya-anchor --selftest && atelya-govern --selftest
 # ^ these three work from a pip install too — offline, no network
@@ -148,7 +162,7 @@ nothing to migrate. If your memory system can emit one JSON event per line
 - a hash chain over that lifecycle, committed by a single ROOT
 - pinpoint verification — `TAMPER DETECTED at seq=N`, exit 1, CI-ready
 - external anchoring that catches whole-history rewrites
-- GDPR soft-forget / hard-purge with sha256-digest markers
+- GDPR soft-forget / hard-purge with HMAC-SHA-256 markers
 - auditor exports (JSON / CSV) and three offline `--selftest`s
 
 Deliberately no performance comparisons: run your own eval, on your own data.
@@ -196,7 +210,7 @@ their machines. → `ronald@atelyaos.com`
 
 - [x] PyPI package (`pip install atelya-attest`) — **0.1.1 published**
 - [x] External anchor ledger with monotonic/consistency checks
-- [x] SHA-256 erasure markers (never the literal pattern)
+- [x] Erasure markers that never hold the literal pattern (HMAC-SHA-256 with a per-data-directory key on `main`; plain SHA-256 in 0.1.1)
 - [ ] Optional Ed25519 / ML-DSA signing (stdlib HMAC stays the default)
 - [ ] Live-store invalidation hook for hard-erase (engine 0.3)
 
@@ -204,7 +218,7 @@ their machines. → `ronald@atelyaos.com`
 
 **AI-assisted, human-verified.** Much of this code was written with AI assistance.
 Every claim in this README was executed and checked against real output before
-publication — that is what the 63-test suite, the four adversarial acceptance
+publication — that is what the 93-test suite, the four adversarial acceptance
 suites, and the published benchmark misses in [CHANGELOG.md](CHANGELOG.md) are
 for. Where a run failed, the failure is in the history rather than edited out.
 

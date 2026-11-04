@@ -87,7 +87,7 @@ complete the picture.
 | **EU AI Act** | **Article 12** (record-keeping): high-risk AI systems shall technically allow automatic recording of events (logs) over the system lifetime | Every memory event is logged append-only **and** integrity-chained; auditors can verify the record was not altered after the fact, and locate any alteration |
 | **SOC 2** (Security / Processing Integrity) | Log integrity & change detection criteria | `verify-chain` gives a repeatable, nonzero-exit integrity check suitable for CI/scheduled controls; root commitments provide point-in-time evidence |
 | **NIST SP 800-92** | Log integrity guidance (protect logs from unauthorized modification; detect tampering) | Hash-chained entries + external root anchoring implement the recommended integrity pattern |
-| **GDPR** | Art. 17 erasure interplay | amem governance implements soft-forget (auditable) and hard-purge; the **purge action itself is a logged, chained event**, so exercising erasure does not silently rewrite history |
+| **GDPR** | Art. 17 erasure interplay | amem governance implements soft-forget (auditable; the text stays in the op-log and in any chain over it) and hard-purge. The chain stores every op-log event **verbatim**, so it holds the text of the records it covers. A hard purge therefore refuses while the default chain file (`<oplog>.attest.jsonl`) exists; `--drop-attest` deletes that file, with the history it recorded, before the purge. A chain written elsewhere with `--out` is neither checked nor cleaned. A chain that stores only hashes and can be verified across purged positions (attest v2) is **not implemented**. The purge leaves a marker event in the op-log (an HMAC-SHA-256 of the erase pattern, never the text); a chain built after the purge starts again from GENESIS, so checking it against a root anchored before the purge reports ANCHOR CONFLICT, as for any rewrite |
 
 ## 5. Auditor runbook (copy-paste)
 
@@ -95,17 +95,20 @@ complete the picture.
 # 0) Installed from PyPI? Substitute the console commands throughout:
 #    atelya-govern / atelya-attest / atelya-anchor  ==  python3 <file>.py
 
-# 1) Build the chain over a memory op-log (per-user JSONL file)
-python3 amem_governance.py attest data/<user>.jsonl --out data/<user>.attest.jsonl
+# 1) Build the chain over a memory op-log (per-user JSONL file). Without --out it goes
+#    to the default path data/<user>.jsonl.attest.jsonl, the one a hard purge checks
+#    for. A chain written elsewhere with --out holds the same text (every event
+#    verbatim) and is neither checked nor cleaned by a hard purge.
+python3 amem_governance.py attest data/<user>.jsonl
 #    -> prints the ROOT COMMITMENT. Record/anchor it externally.
 
 # 2) Verify integrity at any later time (exit code 0 = intact, 1 = tampered)
-python3 amem_governance.py verify-chain data/<user>.attest.jsonl
+python3 amem_governance.py verify-chain data/<user>.jsonl.attest.jsonl
 
 # 3) Keyed mode (defends against credentialed re-chaining)
 export AMEM_ATTEST_KEY="<secret held by the audit function, not by log writers>"
-python3 amem_governance.py attest data/<user>.jsonl --out data/<user>.attest.jsonl
-python3 amem_governance.py verify-chain data/<user>.attest.jsonl
+python3 amem_governance.py attest data/<user>.jsonl
+python3 amem_governance.py verify-chain data/<user>.jsonl.attest.jsonl
 
 # 4) Independent re-derivation (no amem code): implement §2 with any standard
 #    SHA-256/HMAC library and compare digests. The repo's test suite contains a

@@ -40,7 +40,9 @@ post-purge hooks, or not at all.
   guessable pattern could be confirmed by hashing guesses. Existing
   `erasure:sha256:` markers are left as written. A marker for an id-less line
   names no id (its positional id would point at another line after the
-  rewrite).
+  rewrite). On Windows the 0600 mode is not enforced (Windows keeps only the
+  read-only bit of a POSIX mode): the key file relies on the ACL of the
+  location that holds the data directory.
 - **A hard purge refuses while `<oplog>.attest.jsonl` exists**, because the
   chain stores every event verbatim; `--drop-attest` deletes the chain file
   and proceeds. Chain files written elsewhere with `--out` are not checked.
