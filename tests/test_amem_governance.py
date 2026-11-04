@@ -71,11 +71,88 @@ def logfile(tmp_path):
 
 
 # ================================ read_log ========================================
-def test_read_log_skips_malformed_and_blank(tmp_path):
+def test_read_log_skips_blank_lines(tmp_path):
     p = tmp_path / "ops.jsonl"
-    p.write_text('{"op":"add","id":"x","text":"ok"}\n\n{{{not json\n', encoding="utf-8")
+    p.write_text('{"op":"add","id":"x","text":"ok"}\n\n   \n', encoding="utf-8")
     evs = gov.read_log(str(p))
     assert len(evs) == 1 and evs[0]["id"] == "x"
+
+
+@pytest.mark.parametrize(
+    "bad,category",
+    [
+        ('{"op": "add", "text": "secret-xyz', "invalid_json"),
+        ("[1, 2]", "not_object"),
+        ("42", "not_object"),
+        ('"a string"', "not_object"),
+        ("null", "not_object"),
+    ],
+)
+def test_read_log_refuses_a_bad_line_and_names_it(tmp_path, bad, category):
+    # the op-log is the source of truth: a bad line is never skipped silently
+    p = tmp_path / "ops.jsonl"
+    data = '{"op":"add","id":"x","text":"ok"}\n' + bad + '\n{"op":"add","id":"y","text":"ok"}\n'
+    p.write_text(data, encoding="utf-8")
+    with pytest.raises(ValueError) as err:
+        gov.read_log(str(p))
+    assert (
+        getattr(err.value, "lineno", None) == 2 and getattr(err.value, "category", None) == category
+    )
+    assert "repair --quarantine-bad-lines" in str(err.value) and "secret-xyz" not in str(err.value)
+    assert p.read_text(encoding="utf-8") == data  # nothing changed
+
+
+def test_read_log_moves_a_torn_tail_to_dot_torn(tmp_path):
+    p = tmp_path / "ops.jsonl"
+    head = '{"op":"add","id":"x","text":"ok"}\n'
+    p.write_bytes((head + '{"op":"add","id":"y","te').encode())
+    assert [e["id"] for e in gov.read_log(str(p))] == ["x"]
+    assert p.read_bytes() == head.encode()
+    assert (tmp_path / "ops.jsonl.torn").read_bytes() == b'{"op":"add","id":"y","te\n'
+
+
+def test_erase_hard_keeps_every_other_line_byte_for_byte(tmp_path):
+    lines = [
+        '{"op":"add","id":"k","text":"keep me","key":null,"created_at":1.0}',
+        "",
+        '{"text": "legacy keeper"}',
+        '{"op": "add", "id": "z", "text": "erase zebra", "key": null, "created_at": 2.0}',
+    ]
+    p = tmp_path / "ops.jsonl"
+    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    assert gov.erase(str(p), "zebra", hard=True)["ids"] == ["z"]
+    out = p.read_text(encoding="utf-8")
+    assert out.startswith("\n".join(lines[:3]) + "\n") and "zebra" not in out
+
+
+def test_erase_hard_refuses_a_bad_middle_line_and_changes_nothing(tmp_path):
+    p = tmp_path / "ops.jsonl"
+    data = (
+        '{"op":"add","id":"x","text":"ok"}\nnot json\n{"op":"add","id":"z","text":"erase zebra"}\n'
+    )
+    p.write_text(data, encoding="utf-8")
+    with pytest.raises(ValueError):
+        gov.erase(str(p), "zebra", hard=True)
+    assert p.read_text(encoding="utf-8") == data
+
+
+def test_appends_take_the_oplog_lock(logfile):
+    gov.erase(logfile, "Airbus", hard=False)
+    assert os.path.exists(logfile + ".lock")
+
+
+def test_cli_repair_dry_run_then_apply(tmp_path, capsys):
+    p = tmp_path / "ops.jsonl"
+    good, bad = '{"op":"add","id":"x","text":"ok"}', '{"op": "add", "text": "secret-xyz'
+    p.write_text(good + "\n" + bad + "\n" + good.replace('"x"', '"y"') + "\n", encoding="utf-8")
+    assert gov.main(["repair", "--quarantine-bad-lines", str(p)]) == 0
+    out = capsys.readouterr().out
+    assert "line 2: invalid_json" in out and "secret-xyz" not in out
+    assert not (tmp_path / "ops.jsonl.corrupt").exists()
+    assert gov.main(["repair", "--quarantine-bad-lines", "--apply", str(p)]) == 0
+    assert "secret-xyz" not in capsys.readouterr().out
+    assert (tmp_path / "ops.jsonl.corrupt").read_text(encoding="utf-8") == "2\t" + bad + "\n"
+    assert [e["id"] for e in gov.read_log(str(p))] == ["x", "y"]
 
 
 def test_read_log_legacy_text_promoted_to_add(tmp_path):
