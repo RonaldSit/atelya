@@ -140,18 +140,20 @@ separation of duties is what turns "detects accidents" into "detects insiders".
 
 ## Verify it yourself
 
-From a clone (the 137-test suite lives here, not in the wheel):
+From a clone (the 211-test suite lives here, not in the wheel):
 
 ```bash
-python -m pytest tests/ -q      # 137 tests: known-answer vectors, tz-matrix,
+python -m pytest tests/ -q      # 211 tests: known-answer vectors, tz-matrix,
                                 # tamper/reorder/truncation, erasure semantics
 atelya-attest --selftest && atelya-anchor --selftest && atelya-govern --selftest
 # ^ these three work from a pip install too — offline, no network
 ```
 
-We pre-register benchmark pass lines and **publish the misses** — see
-[CHANGELOG.md](CHANGELOG.md). The most recent full-system billing run missed
-our own bar by 1.5 points; it's in there, dated.
+We pre-register benchmark pass lines and **publish the misses**: the most
+recent full-system billing run (2026-07-08) missed our own bar by 1.5 points,
+after two runs on 2026-06-11 that met it (figures under *About Atelya OS*
+below). Those runs are recorded in the engine's changelog, which is not
+published here; this repo's CHANGELOG covers the attest layer only.
 
 ## Where this fits
 
@@ -195,16 +197,21 @@ roadmap; verifiability ships now.
 Atelya Attest is the open, self-verifiable layer of a larger system. The
 engine — semantic memory with same-key supersede, drop-in
 closed-API orchestration and KV-native serving — is
-not published here. Measured on our own bills, not extrapolated:
-**2026-07-08** memory tokens **−76.8%** at turn 12 (**−84.5%** final turn);
-full-system *including* the extraction tax **+33.5%**, which **missed our own
-pre-registered line by 1.5 points — published as measured**. Self-hosted KV
-reuse (CacheBlend, **2026-06**): **6.12× cheaper prefill** (37,113 vs 226,978
-prefill tokens) at **97.5%** per-query agreement with a cold full prefill:
-195 of 200 LongMemEval-S queries got the same verdict from an independent LLM
-judge (claude-haiku-4-5, temperature 0). Qwen2.5-7B-AWQ on one RTX 4070,
-in-process reference, measured with the engine's `benchmarks/bench_real.py`
-(not published here). The speedup cannot be demonstrated on WSL2.
+not published here. Measured on our own bills, not extrapolated, in the
+engine's full-system billing harness (one 24-turn session per run): memory
+tokens **−76.8%** at turn 12 (**2026-07-08**); final turn **−88.0%** and
+**−87.1%** (two runs, **2026-06-11**) and **−84.5%** (**2026-07-08** rerun);
+full-system saving *including* the extraction tax **+39.1%** and **+37.7%**
+(2026-06-11, inside our own pre-registered line) and **+33.5%** (2026-07-08,
+which **missed that line by 1.5 points — published as measured**).
+Self-hosted KV reuse (CacheBlend, LongMemEval-S, n=200 per run,
+Qwen2.5-7B-AWQ on one RTX 4070, in-process reference): **6.12× cheaper
+prefill** in both runs, at **97.5%** per-query agreement with a cold full
+prefill (**2026-06**: 195/200 same verdict from an independent LLM judge,
+claude-haiku-4-5 at temperature 0) and **96.5%** (**2026-07-11** rerun:
+193/200 under lexical-match scoring, no LLM judge). Both measured with the
+engine's `bench_real.py` (not published here). The speedup cannot be
+demonstrated on WSL2.
 
 We're onboarding **3 design partners**: regulated teams who want the memory
 layer *and* the evidence layer, with our hostile acceptance suites run on
@@ -226,7 +233,7 @@ their machines. → `ronald@atelyaos.com`
 
 **AI-assisted, human-verified.** Much of this code was written with AI assistance.
 Every claim in this README was executed and checked against real output before
-publication — that is what the 137-test suite, the four adversarial acceptance
+publication — that is what the 211-test suite, the four adversarial acceptance
 suites, and the published benchmark misses in [CHANGELOG.md](CHANGELOG.md) are
 for. Where a run failed, the failure is in the history rather than edited out.
 

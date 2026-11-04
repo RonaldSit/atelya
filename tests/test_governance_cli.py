@@ -1,19 +1,20 @@
-"""The atelya-govern command line on every supported Python.
+"""The atelya-govern, atelya-attest and atelya-anchor command lines on every
+supported Python.
 
 1. Every documented command form runs and does its job. The forms are
    extracted, not copied: from the docs of this repo that exist among DOCS,
-   the usage block of amem_governance.py, and the repair command printed by
-   the op-log load error (amem_governance, and amem.oplog where the package is
-   in the repo). Optional [parts] are expanded. Each form runs as a subprocess
-   on temp files.
+   the usage blocks of amem_governance.py, amem_attest.py and amem_anchor.py,
+   and the repair command printed by the op-log load error (amem_governance,
+   and amem.oplog where the package is in the repo). Optional [parts] are
+   expanded. Each form runs as a subprocess on temp files.
 2. Options between the subcommand and the path work too (a few undocumented
    orders).
 3. A hard purge without post-purge hooks names every file it cleaned.
-4. The exit codes are the ones the usage text documents.
+4. The governance exit codes are the ones its usage text documents.
 
 With parser.parse_args, argparse on Python 3.10, 3.11, 3.12.0-3.12.6 and
-3.13.0 matched the optional op-log positional to zero strings before an option
-and then rejected the path as "unrecognized arguments" (exit 2), so
+3.13.0 matched an optional positional to zero strings before an option and
+then rejected the path as "unrecognized arguments" (exit 2), so
 `repair --quarantine-bad-lines <oplog>` and every other form with an option
 before the path failed there. parse_intermixed_args parses optionals first.
 
@@ -33,29 +34,78 @@ import pytest
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
+import amem_anchor  # noqa: E402
+import amem_attest  # noqa: E402
 import amem_governance as gov  # noqa: E402
 
-GOV = str(REPO / "amem_governance.py")
 DOCS = [
     "README.md",
     "ATTESTATION.md",
     "docs/PRIVATE-QUICKSTART.md",
     "ATELYA-COMPLIANCE-ONEPAGER-EN.md",
 ]
-PROGRAM = re.compile(r"(?:atelya-govern|amem_governance\.py)(?=[\s`]|$)")
-CMDS = {
-    "audit",
-    "lineage",
-    "conflicts",
-    "erase",
-    "retention",
-    "summary",
-    "attest",
-    "verify-chain",
-    "repair",
+TOOLS = {
+    "govern": {
+        "script": "amem_governance.py",
+        "program": r"(?:atelya-govern|amem_governance\.py)",
+        "module": gov,
+        "cmds": {
+            "audit",
+            "lineage",
+            "conflicts",
+            "erase",
+            "retention",
+            "summary",
+            "attest",
+            "verify-chain",
+            "repair",
+        },
+        "values": {
+            "--id",
+            "--match",
+            "--out",
+            "--max-age-days",
+            "--max-active",
+            "--key",
+            "--keyfile",
+        },
+        "flags": {
+            "--hard",
+            "--selftest",
+            "--quarantine-bad-lines",
+            "--apply",
+            "--drop-attest",
+            "--help",
+        },
+        "no_path": set(),
+    },
+    "attest": {
+        "script": "amem_attest.py",
+        "program": r"(?:atelya-attest|amem_attest\.py)",
+        "module": amem_attest,
+        "cmds": {"attest", "verify", "root"},
+        "values": {"--out", "--key", "--keyfile"},
+        "flags": {"--selftest", "--help"},
+        "no_path": set(),
+    },
+    "anchor": {
+        "script": "amem_anchor.py",
+        "program": r"(?:atelya-anchor|amem_anchor\.py)",
+        "module": amem_anchor,
+        "cmds": {"anchor", "check", "latest"},
+        "values": {
+            "--ledger",
+            "--label",
+            "--key",
+            "--keyfile",
+            "--chain-key",
+            "--chain-keyfile",
+            "--at",
+        },
+        "flags": {"--require-anchor", "--selftest", "--help"},
+        "no_path": {"latest"},
+    },
 }
-VALUE_OPTS = {"--id", "--match", "--out", "--max-age-days", "--max-active", "--key", "--keyfile"}
-FLAG_OPTS = {"--hard", "--selftest", "--quarantine-bad-lines", "--apply", "--drop-attest"}
 KEY = "test-key-not-a-secret"
 RECORDS = [
     {"op": "add", "id": "r1", "text": "walrus secret plan alpha", "created_at": 1718000000},
@@ -118,38 +168,44 @@ def _cut(rest):
     return rest.strip()
 
 
-def _shape(cmdline):
+def _shape(tool, cmdline):
     """A tuple like ("repair", "--quarantine-bad-lines", "P"): positionals become
     "P", value options become (option, None), except --out, which keeps its file
     suffix. None when the text is not a command (prose that names the tool)."""
+    t = TOOLS[tool]
     try:
         toks = shlex.split(cmdline)
     except ValueError:
         return None
-    if not toks or not (toks[0] in CMDS or toks[0].startswith("--")):
+    if not toks or not (toks[0] in t["cmds"] or toks[0].startswith("--")):
         return None
     shape, k = [], 0
     while k < len(toks):
         tok = toks[k]
-        if k == 0 and tok in CMDS:
+        if k == 0 and tok in t["cmds"]:
             shape.append(tok)
         elif tok.startswith("--"):
             opt, eq, val = tok.partition("=")
-            if opt in VALUE_OPTS:
+            if opt in t["values"]:
                 if not eq:
                     k += 1
                     val = toks[k] if k < len(toks) else ""
                 shape.append((opt, Path(val).suffix or ".out") if opt == "--out" else (opt, None))
-            elif opt in FLAG_OPTS:
+            elif opt in t["flags"]:
                 shape.append(opt)
             else:
-                raise AssertionError(
-                    f"unknown option {tok!r} in a documented form: update this test"
-                )
+                raise AssertionError(f"unknown {tool} option {tok!r} in a documented form")
+        elif tok == "/":  # "atelya-anchor anchor / check / latest" names commands in prose
+            return None
         else:
             shape.append("P")
         k += 1
     return tuple(shape)
+
+
+def _runnable(tool, shape):
+    """A subcommand without its path ("atelya-govern attest" in a table) is a mention."""
+    return shape[0] not in TOOLS[tool]["cmds"] or "P" in shape or shape[0] in TOOLS[tool]["no_path"]
 
 
 def _bad_oplog(path):
@@ -175,15 +231,35 @@ def _load_error_messages():
     return msgs
 
 
+def _usage_lines(tool):
+    """(line number, text) of each usage line in the module docstring, with its
+    indented [continuation] lines joined on."""
+    out = []
+    pattern = re.compile(rf"(\s*)python3? {re.escape(TOOLS[tool]['script'])} (.*)$")
+    lines = (TOOLS[tool]["module"].__doc__ or "").splitlines()
+    for n, line in enumerate(lines, 1):
+        m = pattern.match(line)
+        if not m:
+            continue
+        text, indent = m.group(2), len(m.group(1))
+        for more in lines[n:]:
+            if more.strip().startswith("[") and len(more) - len(more.lstrip()) > indent:
+                text += " " + more.strip()
+            else:
+                break
+        out.append((n, text))
+    return out
+
+
 def documented_forms():
-    """{shape: [sources]} for every documented atelya-govern command form."""
+    """{(tool, shape): [sources]} for every documented command form."""
     forms = {}
 
-    def add(source, text):
+    def add(tool, source, text):
         for variant in _expand(text):
-            s = _shape(variant)
-            if s and (s[0] not in CMDS or "P" in s):  # "atelya-govern attest" alone is a mention
-                forms.setdefault(s, []).append(source)
+            s = _shape(tool, variant)
+            if s and _runnable(tool, s):
+                forms.setdefault((tool, s), []).append(source)
 
     for rel in DOCS:
         path = REPO / rel
@@ -198,34 +274,40 @@ def documented_forms():
             joined.append((start, buf + line))
             buf, start = "", None
         for n, line in joined:
-            for m in PROGRAM.finditer(line):
-                add(f"{rel}:{n}", _cut(line[m.end() :]))
-    for n, line in enumerate((gov.__doc__ or "").splitlines(), 1):
-        m = re.match(r"\s*python3? amem_governance\.py (.*)$", line)
-        if m:
-            add(f"usage line {n}", m.group(1))
+            for tool, t in TOOLS.items():
+                for m in re.finditer(t["program"] + r"(?=[\s`]|$)", line):
+                    add(tool, f"{rel}:{n}", _cut(line[m.end() :]))
+    for tool in TOOLS:
+        for n, text in _usage_lines(tool):
+            add(tool, f"{TOOLS[tool]['script']} usage line {n}", text)
     for source, msg in _load_error_messages():
         m = re.search(r"atelya-govern (.*?) \(then add (--[\w-]+)", msg)
         assert m, f"{source} names no repair command: {msg}"
-        add(source, m.group(1))
-        add(f"{source} (+{m.group(2)})", f"{m.group(1)} {m.group(2)}")
+        add("govern", source, m.group(1))
+        add("govern", f"{source} (+{m.group(2)})", f"{m.group(1)} {m.group(2)}")
     return forms
 
 
 FORMS = documented_forms()
 INTERLEAVED = [
-    ("erase", "--hard", "P", ("--match", None)),
-    ("erase", ("--match", None), "P"),
-    ("retention", ("--max-active", None), "P", "--hard"),
-    ("attest", ("--out", ".jsonl"), "P"),
-    ("audit", ("--out", ".csv"), "P"),
-    ("lineage", ("--id", None), "P"),
-    ("repair", "--apply", "--quarantine-bad-lines", "P"),
+    ("govern", ("erase", "--hard", "P", ("--match", None))),
+    ("govern", ("erase", ("--match", None), "P")),
+    ("govern", ("retention", ("--max-active", None), "P", "--hard")),
+    ("govern", ("attest", ("--out", ".jsonl"), "P")),
+    ("govern", ("audit", ("--out", ".csv"), "P")),
+    ("govern", ("lineage", ("--id", None), "P")),
+    ("govern", ("repair", "--apply", "--quarantine-bad-lines", "P")),
+    ("attest", ("attest", ("--out", ".jsonl"), "P")),
+    ("attest", ("verify", ("--key", None), "P")),
+    ("anchor", ("anchor", ("--ledger", None), ("--label", None), "P")),
+    ("anchor", ("check", ("--ledger", None), "P", ("--label", None))),
+    ("anchor", ("check", "--require-anchor", "P", ("--ledger", None))),
 ]
 
 
-def _label(shape):
-    return " ".join(x if isinstance(x, str) else f"{x[0]} {x[1] or 'V'}" for x in shape)
+def _label(tool, shape):
+    words = (x if isinstance(x, str) else f"{x[0]} {x[1] or 'V'}" for x in shape)
+    return f"{tool}: " + " ".join(words)
 
 
 # ----------------------------- running a form -----------------------------
@@ -235,14 +317,15 @@ def _write_oplog(path):
 
 def _env():
     env = dict(os.environ)
-    env.pop("AMEM_ATTEST_KEY", None)
+    for name in ("AMEM_ATTEST_KEY", "AMEM_ANCHOR_KEY"):
+        env.pop(name, None)
     env["PYTHONUTF8"] = "1"
     return env
 
 
-def _run(argv, cwd):
+def _run(tool, argv, cwd):
     return subprocess.run(
-        [sys.executable, GOV, *argv],
+        [sys.executable, str(REPO / TOOLS[tool]["script"]), *argv],
         cwd=cwd,
         capture_output=True,
         text=True,
@@ -251,62 +334,103 @@ def _run(argv, cwd):
     )
 
 
-def _concrete(shape, d):
-    """argv for a shape, on fresh files in d, and what the run must show."""
-    cmd = shape[0] if shape[0] in CMDS else None
-    oplog = os.path.join(d, "log.jsonl")
-    (_bad_oplog if cmd == "repair" else _write_oplog)(oplog)
-    keyfile = os.path.join(d, "attest.key")
+def _ok(res):
+    assert res.returncode == 0, f"setup step failed: rc {res.returncode} {res.stderr[-400:]}"
+
+
+def _opts(shape):
+    return {item[0] for item in shape if isinstance(item, tuple)}
+
+
+def _keyfile(d):
+    keyfile = os.path.join(d, "test.key")
     Path(keyfile).write_text(KEY, encoding="utf-8")
-    key_args = []
-    for item in shape:
-        if isinstance(item, tuple) and item[0] == "--key":
-            key_args = ["--key", KEY]
-        if isinstance(item, tuple) and item[0] == "--keyfile":
-            key_args = ["--keyfile", keyfile]
-    chain = os.path.join(d, "prebuilt.chain.jsonl")
-    if cmd == "verify-chain":
-        built = _run(["attest", oplog, "--out", chain, *key_args], d)
-        assert built.returncode == 0, built.stderr
-    argv, out_file = [], None
+    return keyfile
+
+
+def _key_args(
+    opts, keyfile, key="--key", keyfile_opt="--keyfile", as_key="--key", as_file="--keyfile"
+):
+    if key in opts:
+        return [as_key, KEY]
+    if keyfile_opt in opts:
+        return [as_file, keyfile]
+    return []
+
+
+def _fill(shape, path, values):
+    argv = []
     for item in shape:
         if item == "P":
-            argv.append(chain if cmd == "verify-chain" else oplog)
+            argv.append(path)
         elif isinstance(item, tuple):
-            opt, val = item
-            if opt == "--out":
-                out_file = os.path.join(d, "out" + val)
-                argv += [opt, out_file]
-            elif opt == "--key":
-                argv += [opt, KEY]
-            elif opt == "--keyfile":
-                argv += [opt, keyfile]
-            else:
-                argv += [
-                    opt,
-                    {
-                        "--id": "r1",
-                        "--match": "walrus",
-                        "--max-age-days": "36500",
-                        "--max-active": "10",
-                    }[opt],
-                ]
+            argv += [item[0], values[item[0]]]
         else:
             argv.append(item)
-    return argv, {"cmd": cmd, "oplog": oplog, "out": out_file, "apply": "--apply" in shape}
+    return argv
+
+
+def _concrete(tool, shape, d):
+    """argv for a shape, on fresh files in d, and what the run must show."""
+    cmd = shape[0] if shape[0] in TOOLS[tool]["cmds"] else None
+    oplog = os.path.join(d, "log.jsonl")
+    (_bad_oplog if (tool, cmd) == ("govern", "repair") else _write_oplog)(oplog)
+    keyfile, opts = _keyfile(d), _opts(shape)
+    out_suffix = next((x[1] for x in shape if isinstance(x, tuple) and x[0] == "--out"), "")
+    out_file = os.path.join(d, "out" + out_suffix) if "--out" in opts else None
+    values = {"--out": out_file, "--key": KEY, "--keyfile": keyfile}
+    ctx = {"tool": tool, "cmd": cmd, "oplog": oplog, "out": out_file, "apply": "--apply" in shape}
+    chain = os.path.join(d, "prebuilt.chain.jsonl")
+    if tool == "govern":
+        if cmd == "verify-chain":
+            _ok(_run("govern", ["attest", oplog, "--out", chain, *_key_args(opts, keyfile)], d))
+        values.update(
+            {"--id": "r1", "--match": "walrus", "--max-age-days": "36500", "--max-active": "10"}
+        )
+        return _fill(shape, chain if cmd == "verify-chain" else oplog, values), ctx
+    if tool == "attest":
+        if cmd in ("verify", "root"):
+            _ok(_run("attest", ["attest", oplog, "--out", chain, *_key_args(opts, keyfile)], d))
+        return _fill(shape, oplog if cmd == "attest" else chain, values), ctx
+    # anchor: the ledger key (--key/--keyfile) and the chain key (--chain-key/...) are separate
+    chain_for_attest = _key_args(opts, keyfile, "--chain-key", "--chain-keyfile")
+    chain_for_anchor = _key_args(
+        opts, keyfile, "--chain-key", "--chain-keyfile", "--chain-key", "--chain-keyfile"
+    )
+    _ok(_run("attest", ["attest", oplog, "--out", chain, *chain_for_attest], d))
+    ledger = os.path.join(d, "ledger.jsonl")
+    label = ["--label", "prod"] if "--label" in opts else []
+    if cmd in ("check", "latest"):
+        anchor_argv = ["anchor", chain, "--ledger", ledger, *label]
+        _ok(_run("anchor", anchor_argv + _key_args(opts, keyfile) + chain_for_anchor, d))
+    values.update(
+        {
+            "--ledger": ledger,
+            "--label": "prod",
+            "--chain-key": KEY,
+            "--chain-keyfile": keyfile,
+            "--at": "2026-01-01T00:00:00Z",
+        }
+    )
+    ctx["ledger"] = ledger
+    return _fill(shape, chain, values), ctx
 
 
 def _check_did_its_job(res, ctx):
-    cmd, out = ctx["cmd"], res.stdout
+    tool, cmd, out = ctx["tool"], ctx["cmd"], res.stdout
     first = out.splitlines()[0] if out.strip() else ""
-    if cmd == "erase":
+    if cmd is None:  # --selftest, --help
+        return
+    if tool == "govern" and cmd == "erase":
         assert json.loads(first)["matched"] == 1, out
-    elif cmd == "retention":
+    elif tool == "govern" and cmd == "retention":
         assert "retired" in json.loads(first), out
     elif cmd == "attest":
         assert os.path.getsize(ctx["out"] or ctx["oplog"] + ".attest.jsonl") > 0
-    elif cmd == "verify-chain":
+    elif cmd in ("verify-chain", "verify"):
         assert "VERIFIED" in out, out
+    elif cmd == "root":
+        assert re.search(r"\b[0-9a-f]{64}\b", out), out
     elif cmd == "repair":
         assert "line 2: invalid_json" in out, out
         if ctx["apply"]:
@@ -316,13 +440,15 @@ def _check_did_its_job(res, ctx):
         assert os.path.getsize(ctx["out"]) > 0 if ctx["out"] else out.strip(), out
     elif cmd == "lineage":
         assert "r1" in out, out
-    elif cmd is None:  # --selftest
-        assert "PASS" in out or "pass" in out.lower(), out
+    elif cmd == "anchor":
+        assert len(Path(ctx["ledger"]).read_text(encoding="utf-8").splitlines()) == 1
+    elif cmd == "latest":
+        assert '"root"' in out, out
 
 
-def _run_form(shape, tmp_path):
-    argv, ctx = _concrete(shape, str(tmp_path))
-    res = _run(argv, str(tmp_path))
+def _run_form(tool, shape, tmp_path):
+    argv, ctx = _concrete(tool, shape, str(tmp_path))
+    res = _run(tool, argv, str(tmp_path))
     msg = (
         f"argv {argv}\nrc {res.returncode}\nstdout {res.stdout[-600:]}\nstderr {res.stderr[-600:]}"
     )
@@ -332,25 +458,34 @@ def _run_form(shape, tmp_path):
 
 
 @pytest.mark.parametrize(
-    "shape",
-    [pytest.param(s, id=f"{_label(s)} [{src[0]}]") for s, src in sorted(FORMS.items(), key=str)],
+    "tool,shape",
+    [
+        pytest.param(tool, s, id=f"{_label(tool, s)} [{src[0]}]")
+        for (tool, s), src in sorted(FORMS.items(), key=str)
+    ],
 )
-def test_documented_form_runs(shape, tmp_path):
-    _run_form(shape, tmp_path)
+def test_documented_form_runs(tool, shape, tmp_path):
+    _run_form(tool, shape, tmp_path)
 
 
-@pytest.mark.parametrize("shape", [pytest.param(s, id=_label(s)) for s in INTERLEAVED])
-def test_option_before_the_path_runs(shape, tmp_path):
-    _run_form(shape, tmp_path)
+@pytest.mark.parametrize(
+    "tool,shape", [pytest.param(tool, s, id=_label(tool, s)) for tool, s in INTERLEAVED]
+)
+def test_option_before_the_path_runs(tool, shape, tmp_path):
+    _run_form(tool, shape, tmp_path)
 
 
 def test_extraction_finds_the_forms_users_are_told_to_run():
-    repair = ("repair", "--quarantine-bad-lines", "P")
-    assert repair in FORMS and repair + ("--apply",) in FORMS
+    repair = ("govern", ("repair", "--quarantine-bad-lines", "P"))
+    assert repair in FORMS and ("govern", repair[1] + ("--apply",)) in FORMS
     assert any(s.startswith("amem_governance load error") for s in FORMS[repair])
-    assert any(s.startswith("usage line") for s in FORMS[repair])
-    assert ("--selftest",) in FORMS
-    assert len(FORMS) >= 20, sorted(FORMS, key=str)
+    assert any("usage line" in s for s in FORMS[repair])
+    assert ("govern", ("--selftest",)) in FORMS
+    assert ("attest", ("attest", "P")) in FORMS and ("attest", ("verify", "P")) in FORMS
+    assert ("anchor", ("latest", ("--ledger", None))) in FORMS
+    assert ("anchor", ("check", "P", ("--ledger", None), "--require-anchor")) in FORMS
+    counts = {tool: sum(1 for t, _s in FORMS if t == tool) for tool in TOOLS}
+    assert counts["govern"] >= 20 and counts["attest"] >= 8 and counts["anchor"] >= 40, counts
 
 
 # ----------------------------- the purge names what it cleaned -----------------------------
@@ -394,7 +529,7 @@ def test_hard_erase_without_side_files_names_only_the_oplog(tmp_path, capsys):
 
 def test_hard_retention_names_the_files_and_the_dropped_chain(tmp_path, capsys):
     p = _store_with_side_files(str(tmp_path))
-    assert _run(["attest", p], str(tmp_path)).returncode == 0
+    assert _run("govern", ["attest", p], str(tmp_path)).returncode == 0
     rec = gov.retention(p, max_active=1, hard=True, drop_attest=True)
     names = [
         "log.jsonl",
@@ -410,7 +545,7 @@ def test_hard_retention_names_the_files_and_the_dropped_chain(tmp_path, capsys):
 def test_nothing_matched_but_chain_dropped_says_so(tmp_path, capsys):
     p = os.path.join(str(tmp_path), "log.jsonl")
     _write_oplog(p)
-    assert _run(["attest", p], str(tmp_path)).returncode == 0
+    assert _run("govern", ["attest", p], str(tmp_path)).returncode == 0
     rec = gov.erase(p, "no-such-text", hard=True, drop_attest=True)
     assert rec["matched"] == 0 and rec["cleaned"] == ["log.jsonl.attest.jsonl"], rec
     out = _no_hook_line(rec, capsys)
@@ -432,7 +567,7 @@ def _exit_case(name, d):
     if name == "nothing matched":
         return ["erase", p, "--match", "no-such-text", "--hard"], 0, ""
     if name == "refused: default attest chain present":
-        assert _run(["attest", p], d).returncode == 0
+        assert _run("govern", ["attest", p], d).returncode == 0
         return ["erase", p, "--match", "walrus", "--hard"], 1, "--drop-attest"
     if name == "refused: bad op-log line":
         _bad_oplog(p)
@@ -462,7 +597,7 @@ def _exit_case(name, d):
 )
 def test_exit_codes(name, tmp_path):
     argv, rc, says = _exit_case(name, str(tmp_path))
-    res = _run(argv, str(tmp_path))
+    res = _run("govern", argv, str(tmp_path))
     assert res.returncode == rc and says in res.stdout + res.stderr, (res.returncode, res.stderr)
 
 

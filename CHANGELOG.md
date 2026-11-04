@@ -86,6 +86,20 @@ post-purge hooks, or not at all.
   hooks installed, behaviour is unchanged. 7 new tests; suite: **70**.
 
 ### Fixed
+- `atelya-attest` and `atelya-anchor` had the same parser problem as
+  `atelya-govern` (below): on those Pythons an option before the path
+  (`atelya-anchor anchor --label X chain.jsonl`, `atelya-attest attest --out
+  c.jsonl log.jsonl`) failed with exit 2. Both now use
+  `parse_intermixed_args` (no subparsers, `REMAINDER` or mutually exclusive
+  groups). `tests/test_governance_cli.py` now runs every documented form of
+  all three tools plus five other option orders for these two; suite:
+  **211**.
+- README: the engine figures now give every run of each metric with its
+  source: CacheBlend agreement 97.5% (2026-06, LLM judge) and 96.5%
+  (2026-07-11 rerun, lexical scoring); full-system billing saving +39.1%,
+  +37.7% (2026-06-11) and +33.5% (2026-07-08), and the final-turn figures.
+  It no longer says the billing misses are in this CHANGELOG: they are in
+  the engine's changelog, which is not published.
 - **On Python 3.10, 3.11, 3.12.0 to 3.12.6 and 3.13.0 the CLI rejected an
   option placed between the subcommand and the op-log path** ("unrecognized
   arguments", exit 2). That includes the documented
