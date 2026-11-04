@@ -40,7 +40,8 @@ CLI:
 Hard purge (erase --hard, retention --hard): removes the record's lines, every event naming
 it, matching lines of <oplog>.torn and <oplog>.corrupt, and its .vec lines; the purge marker
 holds HMAC-SHA256 of the erase pattern with <data dir>/.erasure_key (created on first need,
-mode 0600, never deleted by erase or retention; back it up with the data directory, or
+mode 0600, not enforced on Windows, where the file relies on the ACL of the data directory's
+location; never deleted by erase or retention; back it up with the data directory, or
 existing HMACs can no longer be checked; markers written before hold a plain SHA-256 and are
 left as they are). It refuses while <oplog>.attest.jsonl exists, because that chain stores
 every event verbatim; --drop-attest deletes the chain file first. Chains written elsewhere
@@ -49,11 +50,16 @@ Post-purge hooks: after every HARD erase/retention, each installed entry point
 in the group "atelya.purge_hooks" is called with the op-log path, the purged
 record ids with SHA-256 digests of their texts, and (erase only) the matcher.
 Hooks never receive the erased text. The CLI prints every hook and its
-outcome, or a line saying none is installed; a failed hook exits 1.
+outcome, or, when none is installed, the files the purge cleaned ("cleaned"
+in the JSON line); a failed hook exits 1.
 
 Exit codes (erase, retention): 0 on success, including when nothing matched
-or nothing was due. Erasure is idempotent: re-running after a failed hook is
-expected to match nothing. 1 means a post-purge hook failed. To know whether
+or nothing was due. 1 means a post-purge hook failed, or the command refused
+or could not run: the default attest chain exists (hard purge), a bad op-log
+line, an invalid --match regex, a missing op-log; the message says which.
+Argument errors (an unknown option, a missing value) exit 2. Erasure is
+idempotent: re-running after a failed hook is expected to match nothing; a
+refused command refuses again until its cause is fixed. To know whether
 anything was erased, read "matched" (erase) or "retired" (retention) from
 the JSON line the command prints first, not the exit code.
 
@@ -639,12 +645,13 @@ def _scrub_side_files(path, texts):
     """Drop from <oplog>.torn and <oplog>.corrupt every line holding a purged text: a line with a "text" field whose
     string, maybe truncated, is a prefix of a purged text (no minimum length), and
     any line holding a 20-character substring of one. Texts are matched in all
-    text_forms. Returns the number of lines dropped. Caller holds the lock."""
+    text_forms. Returns {side file path: lines dropped} for the files that lost a
+    line, in suffix order. Caller holds the lock."""
     forms = [f for t in texts for f in text_forms(t)]
     if not forms:
-        return 0
+        return {}
     windows = {f[i : i + _WINDOW] for f in forms for i in range(len(f) - _WINDOW + 1)}
-    dropped = 0
+    cleaned = {}
     for suffix in (TORN_SUFFIX, CORRUPT_SUFFIX):
         side = path + suffix
         if not os.path.exists(side):
@@ -659,12 +666,11 @@ def _scrub_side_files(path, texts):
             # "text" and the windows are searched anywhere in the line, so the
             # "<line number><TAB>" prefix of a .corrupt line needs no stripping
             line = raw.decode("utf-8", "replace")
-            if _holds_purged(line, forms, windows):
-                dropped += 1
-            else:
+            if not _holds_purged(line, forms, windows):
                 kept.append(raw)
         if len(kept) == len(pieces):
             continue
+        cleaned[side] = len(pieces) - len(kept)
         if not kept:
             os.remove(side)
             continue
@@ -673,7 +679,19 @@ def _scrub_side_files(path, texts):
             for raw in kept:
                 f.write(raw + b"\n")
         os.replace(tmp, side)
-    return dropped
+    return cleaned
+
+
+def _cleaned_names(path, purged, n_vec, side, attest_dropped):
+    """Base names of the files a hard purge rewrote or deleted, in a fixed order:
+    the op-log (when records were purged), .vec, .torn, .corrupt, the attest chain."""
+    names = [os.path.basename(path)] if purged else []
+    if n_vec:
+        names.append(os.path.basename(path) + ".vec")
+    names += [os.path.basename(s) for s in side]
+    if attest_dropped:
+        names.append(os.path.basename(path) + ATTEST_SUFFIX)
+    return names
 
 
 def _marker_id(rid):
@@ -789,7 +807,7 @@ def erase(path, pattern, hard=False, drop_attest=False):
             )
             _bump_epoch(path)  # F3c
             return {"matched": len(targets), "mode": "soft", "ids": sorted(targets)}
-        n_vec, n_side, digests = 0, 0, {}
+        n_vec, side, digests = 0, {}, {}
         if targets:
             kept, texts, kept_ids = _purge_plan(lines, targets)
             mark = "erasure:hmac-sha256:" + _hmac_hex(path, pattern)
@@ -806,7 +824,7 @@ def erase(path, pattern, hard=False, drop_attest=False):
             _rewrite(path, kept, markers)
             _bump_epoch(path)  # F3c
             n_vec = _purge_vec(path, targets, keep_ids=kept_ids)  # F3a: the embeddings too
-            n_side = _scrub_side_files(path, [t for ts in texts.values() for t in ts])
+            side = _scrub_side_files(path, [t for ts in texts.values() for t in ts])
             digests = {rid: _digests(ts) for rid, ts in texts.items()}
     hooks = run_purge_hooks(path, digests, lambda text: bool(regex.search(text or "")))
     if not targets:
@@ -817,11 +835,14 @@ def erase(path, pattern, hard=False, drop_attest=False):
             "mode": "hard",
             "ids": sorted(targets),
             "vec_purged": n_vec,
-            "side_lines_purged": n_side,
+            "side_lines_purged": sum(side.values()),
             "hooks": hooks,
         }
     if attest_dropped:
         out["attest_dropped"] = True
+    cleaned = _cleaned_names(path, bool(targets), n_vec, side, attest_dropped)
+    if cleaned:
+        out["cleaned"] = cleaned
     return out
 
 
@@ -849,7 +870,7 @@ def retention(path, max_age_days=None, max_active=None, hard=False, drop_attest=
             if len(active) > max_active:
                 doomed += active[: len(active) - max_active]  # oldest first
         doomed = sorted(set(doomed))
-        digests = {}
+        digests, n_vec, side = {}, 0, {}
         if not doomed:
             if not hard:
                 return {"retired": 0, "mode": "soft"}
@@ -862,8 +883,8 @@ def retention(path, max_age_days=None, max_active=None, hard=False, drop_attest=
             ]
             _rewrite(path, kept, markers)
             _bump_epoch(path)  # F3c
-            _purge_vec(path, gone, keep_ids=kept_ids)  # F3a: the embeddings too
-            _scrub_side_files(path, [t for ts in texts.values() for t in ts])
+            n_vec = _purge_vec(path, gone, keep_ids=kept_ids)  # F3a: the embeddings too
+            side = _scrub_side_files(path, [t for ts in texts.values() for t in ts])
             digests = {rid: _digests(ts) for rid, ts in texts.items()}
         else:
             _append_lines(
@@ -883,6 +904,9 @@ def retention(path, max_age_days=None, max_active=None, hard=False, drop_attest=
         out = {"retired": len(doomed), "mode": "hard", "ids": doomed, "hooks": hooks}
     if attest_dropped:
         out["attest_dropped"] = True
+    cleaned = _cleaned_names(path, bool(doomed), n_vec, side, attest_dropped)
+    if cleaned:
+        out["cleaned"] = cleaned
     return out
 
 
@@ -965,13 +989,13 @@ def _print_hooks(record, hard):
     hooks = record.get("hooks") or []
     if not hooks:
         purged = record.get("matched", record.get("retired", 0))
+        cleaned = ", ".join(record.get("cleaned") or [])
+        if purged:
+            what = f"cleaned only {cleaned}"
+        else:
+            what = "nothing was purged" + (f" (deleted {cleaned})" if cleaned else "")
         print(
-            f"  post-purge hooks: none installed (entry-point group {PURGE_HOOK_GROUP!r}); "
-            + (
-                "only the op-log and its .vec sidecar were purged"
-                if purged
-                else "nothing was purged"
-            )
+            f"  post-purge hooks: none installed (entry-point group {PURGE_HOOK_GROUP!r}); {what}"
         )
         return 0
     failed = 0
@@ -1024,7 +1048,13 @@ def main(argv=None):
     parser.add_argument("--quarantine-bad-lines", action="store_true")
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--drop-attest", action="store_true")
-    args = parser.parse_args(argv)
+    # parse_intermixed_args, not parse_args: on Python 3.10, 3.11, 3.12.0-3.12.6 and
+    # 3.13.0, parse_args gives the optional "oplog" positional zero strings when an
+    # option follows the subcommand, then rejects the path as unrecognized, so
+    # `repair --quarantine-bad-lines <oplog>` failed there. This parser has no
+    # subparsers, no REMAINDER and no mutually exclusive groups, which
+    # parse_intermixed_args does not support.
+    args = parser.parse_intermixed_args(argv)
 
     if args.selftest:
         return _selftest()

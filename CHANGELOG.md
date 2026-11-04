@@ -86,6 +86,27 @@ post-purge hooks, or not at all.
   hooks installed, behaviour is unchanged. 7 new tests; suite: **70**.
 
 ### Fixed
+- **On Python 3.10, 3.11, 3.12.0 to 3.12.6 and 3.13.0 the CLI rejected an
+  option placed between the subcommand and the op-log path** ("unrecognized
+  arguments", exit 2). That includes the documented
+  `repair --quarantine-bad-lines <oplog>`, which the op-log load error tells
+  the user to run. argparse on those versions matched the optional `oplog`
+  positional to zero strings before the option, then had no positional left
+  for the path; the parser now uses `parse_intermixed_args`. New
+  `tests/test_governance_cli.py` runs every command form found in README.md,
+  ATTESTATION.md, the usage text and the load error, plus a few other option
+  orders, and checks that each does its job; CI runs the suite on 3.10, 3.11,
+  3.12.3 (Ubuntu 24.04's Python), 3.12 and 3.13.
+- After a hard purge with no post-purge hook installed, the CLI said "only
+  the op-log and its .vec sidecar were purged", although `.torn` and
+  `.corrupt` are cleaned too. It now names every file the purge rewrote or
+  deleted (op-log, `.vec`, `.torn`, `.corrupt`, and the attest chain dropped
+  with `--drop-attest`), and the JSON line gains `cleaned` (base names) when
+  there is one. The usage text now says that exit 1 also means the command
+  refused or could not run (default attest chain present, bad op-log line,
+  invalid `--match`, missing op-log), that argument errors exit 2, and that
+  the 0600 mode of `.erasure_key` is not enforced on Windows. 44 new tests;
+  suite: **137**.
 - `erase` that matches no record printed `HARD PURGE (content removed)` (or
   `SOFT forget` without `--hard`), and with no hooks installed also claimed
   "the op-log and its .vec sidecar were purged". Nothing had been touched.
