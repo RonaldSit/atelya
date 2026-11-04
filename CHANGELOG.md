@@ -6,6 +6,23 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+The changes below fix residue that a hard `erase` or hard `retention` left
+behind. Before, a hard purge removed the record's own lines but could leave
+its text, or values derived from it, elsewhere in the op-log: old
+`key_conflict` events (an 80-character excerpt and no id), `flag` events
+naming the record (kept by retention), old-format lines without an id
+(matched but not removed), purge markers holding a plain SHA-256 of the
+pattern, and `.vec` lines of ids the op-log no longer names. The details are
+under Changed below. The attest hash chain has limits. It stores every
+op-log event verbatim, so it holds the text of every record it covers. A
+hard purge therefore refuses while `<oplog>.attest.jsonl` exists, and
+`--drop-attest` deletes that file together with the history it recorded. A
+chain written elsewhere with `--out` is neither checked nor cleaned. A chain
+that stores only hashes and can be verified across purged positions is not
+implemented. The tool rewrites only the op-log and its side files (`.torn`,
+`.corrupt`, `.vec`); copies kept anywhere else are reached only by installed
+post-purge hooks, or not at all.
+
 ### Changed
 - **Hard purge removes every trace it can reach, by one rule for erase and
   retention.** Every event naming a purged id in `id`, `a`, `b` or `holder`
