@@ -6,7 +6,31 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **Bad op-log lines are no longer skipped silently.** The op-log is the
+  source of truth, so `read_log` (and every command built on it) now raises
+  `OplogError` for a line that is not valid JSON or is JSON but not an
+  object, naming the file and line number and the repair command; the
+  message never contains the line. Before, invalid JSON was skipped and a
+  non-object line crashed with `AttributeError` or `TypeError`.
+  - A **torn tail** (the last line has no newline and does not parse, as
+    left by a crash mid-write) is appended unchanged to `<oplog>.torn` and
+    truncated, and the read continues.
+  - Hard `erase` and `retention` keep every other line **byte for byte**
+    (blank lines and legacy `{"text": ...}` lines included); before, they
+    re-serialized every kept event and dropped invalid lines. They refuse
+    to run when a middle line is bad.
+  - `verify-chain` never repairs the chain file; a bad line there is
+    reported as tampering.
+  - Every append, rewrite, torn-tail move and repair holds `<oplog>.lock`
+    (`fcntl.flock`; `msvcrt.locking` on Windows, not tested on Windows).
+
 ### Added
+- `repair --quarantine-bad-lines <oplog>`: a dry run lists bad lines by
+  number and category, never their content; `--apply` moves them unchanged
+  to `<oplog>.corrupt` as `<line number><TAB><line>`, moves a torn tail to
+  `<oplog>.torn`, and keeps every other line in order. 11 new tests, one
+  replaced (it pinned the silent skipping); suite: **85**.
 - Post-purge hooks. After every **hard** erase or retention, each installed entry
   point in the group `atelya.purge_hooks` is called as
   `hook(oplog_path, purged, match)`: `purged` maps each purged record id to the
