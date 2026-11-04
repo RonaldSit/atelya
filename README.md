@@ -140,10 +140,10 @@ separation of duties is what turns "detects accidents" into "detects insiders".
 
 ## Verify it yourself
 
-From a clone (the 93-test suite lives here, not in the wheel):
+From a clone (the 137-test suite lives here, not in the wheel):
 
 ```bash
-python -m pytest tests/ -q      # 93 tests: known-answer vectors, tz-matrix,
+python -m pytest tests/ -q      # 137 tests: known-answer vectors, tz-matrix,
                                 # tamper/reorder/truncation, erasure semantics
 atelya-attest --selftest && atelya-anchor --selftest && atelya-govern --selftest
 # ^ these three work from a pip install too — offline, no network
@@ -198,9 +198,13 @@ closed-API orchestration and KV-native serving — is
 not published here. Measured on our own bills, not extrapolated:
 **2026-07-08** memory tokens **−76.8%** at turn 12 (**−84.5%** final turn);
 full-system *including* the extraction tax **+33.5%**, which **missed our own
-pre-registered line by 1.5 points — published as measured**. **2026-07-11**
-self-hosted KV reuse: **6.12× cheaper prefill** at **96%** per-query agreement
-(RTX 4070, n=200).
+pre-registered line by 1.5 points — published as measured**. Self-hosted KV
+reuse (CacheBlend, **2026-06**): **6.12× cheaper prefill** (37,113 vs 226,978
+prefill tokens) at **97.5%** per-query agreement with a cold full prefill:
+195 of 200 LongMemEval-S queries got the same verdict from an independent LLM
+judge (claude-haiku-4-5, temperature 0). Qwen2.5-7B-AWQ on one RTX 4070,
+in-process reference, measured with the engine's `benchmarks/bench_real.py`
+(not published here). The speedup cannot be demonstrated on WSL2.
 
 We're onboarding **3 design partners**: regulated teams who want the memory
 layer *and* the evidence layer, with our hostile acceptance suites run on
@@ -212,13 +216,17 @@ their machines. → `ronald@atelyaos.com`
 - [x] External anchor ledger with monotonic/consistency checks
 - [x] Erasure markers that never hold the literal pattern (HMAC-SHA-256 with a per-data-directory key on `main`; plain SHA-256 in 0.1.1)
 - [ ] Optional Ed25519 / ML-DSA signing (stdlib HMAC stays the default)
-- [ ] Live-store invalidation hook for hard-erase (engine 0.3)
+- [x] Live-store invalidation after hard-erase: post-purge hooks
+  (`atelya.purge_hooks`, on `main`, not in 0.1.1); engine 0.3.0 uses them to
+  clean its session and memory-tool files, and its running servers reload the
+  store when the purge epoch file changes. GPU KV caches built from erased
+  text are not covered.
 
 ## How this was built
 
 **AI-assisted, human-verified.** Much of this code was written with AI assistance.
 Every claim in this README was executed and checked against real output before
-publication — that is what the 93-test suite, the four adversarial acceptance
+publication — that is what the 137-test suite, the four adversarial acceptance
 suites, and the published benchmark misses in [CHANGELOG.md](CHANGELOG.md) are
 for. Where a run failed, the failure is in the history rather than edited out.
 
