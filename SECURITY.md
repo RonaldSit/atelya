@@ -5,7 +5,20 @@
 | Version | Supported |
 |---------|-----------|
 | 0.2.x   | ✅        |
-| 0.1.x   | ✅        |
+| 0.1.x   | ❌        |
+
+0.1.x is no longer supported. Its hard erase (`erase --hard`, `retention
+--hard`) left traces of the erased records behind: `key_conflict` events
+with an 80-character excerpt of the text, `flag` events kept by retention,
+old-format lines without an id that matched but stayed in the file, purge
+markers holding a plain SHA-256 of the erase pattern, and `.vec` lines of
+ids the op-log no longer names. 0.2.0 removes all of these (see
+CHANGELOG.md, 0.2.0). Upgrade to 0.2.0 or later: `pip install -U
+"atelya-attest>=0.2.0"`. Existing op-logs need no migration. Upgrading does
+not remove traces that a 0.1.x hard erase already left: `.vec` lines of ids
+the op-log no longer names go at the next hard purge that matches a record,
+but old `key_conflict` excerpts, `flag` events naming records purged
+earlier, and plain SHA-256 markers stay in the op-log.
 
 ## Reporting a vulnerability
 
