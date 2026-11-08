@@ -7,7 +7,10 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # ubuntu-latest is ubuntu-26.04, for which setup-python has no 3.12.3 build: since
+    # c384b7c added it, the 3.12.3 job failed at setup and never ran a test. It runs on
+    # ubuntu-24.04, the system it stands for.
+    runs-on: ${{ matrix.python-version == '3.12.3' && 'ubuntu-24.04' || 'ubuntu-latest' }}
     timeout-minutes: 10
     strategy:
       fail-fast: false
