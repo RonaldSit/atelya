@@ -529,15 +529,16 @@ V1_EVENTS = [
     {"op": "forget", "id": "k1", "ts": 1500.0},
     {"op": "flag", "a": "k1", "b": "k2", "why": "numeric_mismatch", "ts": 1600.0},
     {"text": "neutral legacy line"},
+    {"op": "supersede", "id": "k1", "ts": "1970-01-01T00:30:00.000000Z"},  # v1: ts not read
 ]
-# Produced by amem_attest.py before W2 (atelya-public e250e1d): rebuilding a chain from
+# Produced by amem_attest.py before W2 (atelya main d8f9770 = atelya-public e250e1d): rebuilding a chain from
 # a v1 op-log must hash exactly as before, or it conflicts with its anchors.
-V1_ROOT = "509935b50d2316c89061ec1f08e8f8f83bab567173f288a3a9a8fc4440f5f356"
+V1_ROOT = "fcc665589b4d4aab5f16dc28af01409e2ab34dcc14e2acf2a6fc494900b93bff"
 
 
 def test_attest_v1_entries_are_unchanged():
     chain = attest.build_chain(V1_EVENTS, None)
-    assert [e["ts"] for e in chain] == ["1970-01-01T00:16:40Z", None, None, None]
+    assert [e["ts"] for e in chain] == ["1970-01-01T00:16:40Z", None, None, None, None]
     assert attest.root_of(chain) == V1_ROOT
 
 
