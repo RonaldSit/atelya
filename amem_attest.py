@@ -45,6 +45,21 @@ import uuid
 import signal
 
 GENESIS = "GENESIS"
+OPLOG_SCHEMA_VERSION = 2  # the highest op-log schema version build_chain reads (atelya W2)
+
+
+def _schema_version(event, seq):
+    """The op-log schema version of an event (absent = 1). ValueError for a version
+    this code cannot read: a newer one, or one that is not a positive integer."""
+    v = event.get("v", 1)
+    if isinstance(v, bool) or not isinstance(v, int) or v < 1:
+        raise ValueError(f"event at seq {seq} has a schema version that is not a positive integer")
+    if v > OPLOG_SCHEMA_VERSION:
+        raise ValueError(
+            f"event at seq {seq} has schema version {v}; this version reads op-logs up to "
+            f"version {OPLOG_SCHEMA_VERSION}, so it was written by a newer version"
+        )
+    return v
 
 
 def canonical(payload) -> bytes:
@@ -78,15 +93,23 @@ def build_chain(events, key: bytes | None):
     Note: the ``key`` argument is the optional HMAC secret (bytes). It is
     unrelated to the per-event ``"key"`` field, which names the memory slot
     used for supersede semantics.
+
+    Entry ts: a schema-2 event's own "ts" (RFC 3339, as written); otherwise, as
+    before, its "created_at" to the second, or null. A version-1 entry is built
+    exactly as before, so a chain rebuilt from an old op-log keeps its hashes.
+    ValueError for an event of a schema version this code cannot read.
     """
     chain, prev = [], GENESIS
     for seq, event in enumerate(events):
         ts = event.get("created_at")
-        rfc3339 = (
-            time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
-            if isinstance(ts, (int, float))
-            else None
-        )
+        if _schema_version(event, seq) >= 2 and isinstance(event.get("ts"), str):
+            rfc3339 = event["ts"]
+        else:
+            rfc3339 = (
+                time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
+                if isinstance(ts, (int, float))
+                else None
+            )
         entry = {
             "seq": seq,
             "event_id": event.get("id")
@@ -182,7 +205,10 @@ def main(argv=None):
 
     if args.cmd == "attest":
         events = read_jsonl(args.path)
-        chain = build_chain(events, key)
+        try:
+            chain = build_chain(events, key)
+        except ValueError as e:
+            sys.exit(f"{args.path}: {e}; refusing to attest it")
         out = args.out or (args.path + ".attest.jsonl")
         with open(out, "w", encoding="utf-8") as f:
             for e in chain:

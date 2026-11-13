@@ -12,6 +12,12 @@ Op-log events (amem memory.py): {"op":"add","id","text","key","created_at"} | {"
 event names records only through id, a, b and holder (REF_FIELDS), and carries reason codes or
 HMACs. Older logs may hold key_conflict events with a "text" excerpt and no id, and flags whose
 "why" is text; a hard purge removes them with their record.
+Schema version and time (atelya docs/oplog-schema.md): every event written since schema 2
+carries "ts" (RFC 3339 UTC with microseconds and Z) and "v": 2; an add also keeps
+"created_at" (epoch seconds), so older readers still date it. A line without "v" is version 1.
+Old time formats (created_at or ts as epoch seconds) are read in memory only, never rewritten.
+A line with "v" above 2, or a "v" that is not a positive integer, is refused before anything
+is changed, naming the file, the line and the version found.
 Superseded/forgotten records are RETAINED (status change, not removal) => full auditable history.
 
 Features (all pure-python over the op-log; no amem / GPU / API):
@@ -72,11 +78,13 @@ root externally (WORM/notary) for full assurance.
 import argparse
 import contextlib
 import csv
+import datetime
 import errno
 import hashlib
 import hmac
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -118,6 +126,129 @@ class OplogError(ValueError):
             f"List bad lines: atelya-govern repair --quarantine-bad-lines {q} "
             f"(then add --apply to move them to {path}.corrupt)"
         )
+
+
+# ---- schema version and times (same rules as amem/oplog.py; atelya checks both) ----
+SCHEMA_VERSION = 2  # what new events carry; the highest version this code reads
+
+
+class SchemaVersionError(OplogError):
+    """A line this code cannot read: written by a newer version ("newer_schema"),
+    or with a "v" that is not a positive integer ("bad_schema"). found is the
+    version (newer_schema) or the JSON type (bad_schema), never a value from the
+    line. repair is no remedy (it keeps every JSON object), so it is not named."""
+
+    def __init__(self, path, lineno, category, found):
+        self.path, self.lineno, self.category, self.found = path, lineno, category, found
+        if category == "newer_schema":
+            msg = (
+                f"{path}: line {lineno} has schema version {found}; this version of atelya "
+                f"reads versions up to {SCHEMA_VERSION}, so the op-log was written by a newer "
+                f"version. Refusing to load it; upgrade atelya to read it."
+            )
+        else:
+            msg = (
+                f"{path}: line {lineno} has a schema version that is not a positive integer "
+                f"(a JSON {found}); refusing to load it."
+            )
+        ValueError.__init__(self, msg)
+
+
+def _json_type(x):
+    if x is None:
+        return "null"
+    if isinstance(x, bool):
+        return "boolean"
+    if isinstance(x, int):
+        return "integer below 1"
+    if isinstance(x, float):
+        return "number"
+    if isinstance(x, str):
+        return "string"
+    return "array" if isinstance(x, list) else "object"
+
+
+def check_schema(path, lineno, ev):
+    """Raise SchemaVersionError unless this code reads ev's version (absent = 1)."""
+    if "v" not in ev:
+        return
+    v = ev["v"]
+    if isinstance(v, bool) or not isinstance(v, int) or v < 1:
+        raise SchemaVersionError(path, lineno, "bad_schema", _json_type(v))
+    if v > SCHEMA_VERSION:
+        raise SchemaVersionError(path, lineno, "newer_schema", v)
+
+
+_TS_RE = re.compile(
+    r"([0-9]{4})-([0-9]{2})-([0-9]{2})[Tt]([0-9]{2}):([0-9]{2}):([0-9]{2})"
+    r"(?:\.([0-9]{1,9}))?([Zz]|[+-][0-9]{2}:[0-9]{2})"
+)
+
+
+def format_ts(t):
+    """The ts of a new event: RFC 3339, UTC, microseconds, trailing Z."""
+    return datetime.datetime.fromtimestamp(t, datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%S.%fZ"
+    )
+
+
+def parse_ts(s):
+    """Epoch seconds of an RFC 3339 string, or None. A fraction beyond microseconds
+    is cut, not rounded; a missing zone, a leap second or an impossible date is None.
+    A regex plus datetime: the same on Python 3.10, whose fromisoformat rejects Z."""
+    if not isinstance(s, str):
+        return None
+    m = _TS_RE.fullmatch(s)
+    if m is None:
+        return None
+    y, mo, d, h, mi, sec, frac, zone = m.groups()
+    off = 0
+    if zone not in ("Z", "z"):
+        oh, om = int(zone[1:3]), int(zone[4:6])
+        if oh > 23 or om > 59:
+            return None
+        off = (oh * 60 + om) * (-1 if zone[0] == "-" else 1)
+    try:
+        dt = datetime.datetime(
+            int(y),
+            int(mo),
+            int(d),
+            int(h),
+            int(mi),
+            int(sec),
+            int((frac or "").ljust(6, "0")[:6]),
+            tzinfo=datetime.timezone(datetime.timedelta(minutes=off)),
+        )
+    except ValueError:
+        return None
+    return dt.timestamp()
+
+
+def _finite(x):
+    """x if it is a finite number (not a bool), else None."""
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        return None
+    try:
+        return x if math.isfinite(x) else None
+    except OverflowError:  # an int too large for a float
+        return None
+
+
+def event_time(ev):
+    """The time of an event in epoch seconds, or None, from every format written so
+    far: created_at (a number), else ts (an epoch number in v1, RFC 3339 in v2). A
+    created_at that is not a number is no time (an old-format line: sorts as 0)."""
+    t = _finite(ev.get("created_at"))
+    if t is None:
+        t = _finite(ev.get("ts"))
+    if t is None:
+        t = parse_ts(ev.get("ts"))
+    return t
+
+
+def _stamp(ev, now=None):
+    """A new event as written since schema 2: its ts and v."""
+    return dict(ev, ts=format_ts(time.time() if now is None else now), v=SCHEMA_VERSION)
 
 
 def classify(raw):
@@ -247,39 +378,42 @@ def _append_lines(path, lines):
                 f.write((line + "\n").encode("utf-8"))
 
 
-def _load_lines(path, repair=True):
+def _load_lines(path, repair=True, schema=True):
     """[(lineno, raw bytes, event or None for a blank line)] for every line, read
     under the lock. repair: move a torn tail to <path>.torn first; without it (or
-    in a read-only directory) a torn tail raises like any other bad line."""
+    in a read-only directory) a torn tail raises like any other bad line.
+    schema: refuse a line this code cannot read (check_schema) before anything is
+    changed, ahead of any other bad line (op-logs; not a chain file)."""
     if not os.path.exists(path):
         raise FileNotFoundError(errno.ENOENT, "op-log not found", path)
     with oplog_lock(path, readonly_ok=True) as locked:
         with open(path, "rb") as f:
             data = f.read()
-        if repair and data and not data.endswith(b"\n"):
-            start = data.rfind(b"\n") + 1
-            if classify(data[start:])[0] is not None:
-                if not locked:
-                    raise OplogError(path, data.count(b"\n") + 1, "torn_tail")
-                with open(path, "rb+") as f:
-                    _fix_tail(path, f, keep_torn=True)
-                    f.seek(0)
-                    data = f.read()
-    pieces = data.split(b"\n")
-    terminated = data.endswith(b"\n") or not data
-    if terminated:
-        pieces = pieces[:-1]
+        pieces = data.split(b"\n")
+        terminated = data.endswith(b"\n") or not data
+        if terminated:
+            pieces = pieces[:-1]
+        parsed = [classify(raw) for raw in pieces]
+        if schema:
+            for i, (cat, ev) in enumerate(parsed, 1):
+                if cat is None:
+                    check_schema(path, i, ev)
+        if repair and not terminated and parsed[-1][0] is not None:
+            if not locked:
+                raise OplogError(path, len(pieces), "torn_tail")
+            with open(path, "rb+") as f:
+                _fix_tail(path, f, keep_torn=True)
+            pieces, parsed, terminated = pieces[:-1], parsed[:-1], True
     out = []
-    for i, raw in enumerate(pieces, 1):
-        cat, ev = classify(raw)
+    for i, (cat, ev) in enumerate(parsed, 1):
         if cat == "blank":
-            out.append((i, raw, None))
+            out.append((i, pieces[i - 1], None))
             continue
         if cat is not None:
             if i == len(pieces) and not terminated:
                 cat = "torn_tail"
             raise OplogError(path, i, cat)
-        out.append((i, raw, ev))
+        out.append((i, pieces[i - 1], ev))
     return out
 
 
@@ -307,13 +441,13 @@ def _promote(ev):
     return ev
 
 
-def read_events(path, repair=True):
+def read_events(path, repair=True, schema=True):
     """[(lineno, event)] for every non-blank line, as written (no legacy promotion)."""
-    return [(n, ev) for n, _raw, ev in _load_lines(path, repair) if ev is not None]
+    return [(n, ev) for n, _raw, ev in _load_lines(path, repair, schema) if ev is not None]
 
 
-def read_log(path, repair=True):
-    return [_promote(ev) for _n, ev in read_events(path, repair)]
+def read_log(path, repair=True, schema=True):
+    return [_promote(ev) for _n, ev in read_events(path, repair, schema)]
 
 
 def replay(events):
@@ -335,7 +469,7 @@ def replay(events):
                 "id": rid,
                 "text": ev.get("text", ""),
                 "key": ev.get("key"),
-                "created_at": ev.get("created_at"),
+                "created_at": event_time(ev),  # created_at, else a v2 ts; None: no time
                 "status": "active",
                 "actor": ev.get("actor") or ev.get("source"),
                 "history": ["add"],
@@ -361,7 +495,7 @@ def audit_timeline(events):
     rows = []
     for i, ev in enumerate(events):
         op = ev.get("op", "add")
-        ts = ev.get("created_at")
+        ts = event_time(ev)  # created_at, or ts in either format
         when = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(ts)) if ts else ""
         if op == "flag":
             detail = f"contradiction a={ev.get('a')} b={ev.get('b')} why={ev.get('why')}"
@@ -795,12 +929,7 @@ def erase(path, pattern, hard=False, drop_attest=False):
                 path,
                 [
                     json.dumps(
-                        {
-                            "op": "forget",
-                            "id": rid,
-                            "reason": f"erasure:/{pattern}/",
-                            "created_at": time.time(),
-                        }
+                        _stamp({"op": "forget", "id": rid, "reason": f"erasure:/{pattern}/"})
                     )
                     for rid in targets
                 ],
@@ -812,13 +941,14 @@ def erase(path, pattern, hard=False, drop_attest=False):
             kept, texts, kept_ids = _purge_plan(lines, targets)
             mark = "erasure:hmac-sha256:" + _hmac_hex(path, pattern)
             markers = [
-                {
-                    "op": "purge",
-                    "id": _marker_id(rid),
-                    "reason": mark,
-                    "created_at": time.time(),
-                    "note": "content removed for compliance",
-                }
+                _stamp(
+                    {
+                        "op": "purge",
+                        "id": _marker_id(rid),
+                        "reason": mark,
+                        "note": "content removed for compliance",
+                    }
+                )
                 for rid in sorted(targets)
             ]
             _rewrite(path, kept, markers)
@@ -878,7 +1008,7 @@ def retention(path, max_age_days=None, max_active=None, hard=False, drop_attest=
             gone = set(doomed)
             kept, texts, kept_ids = _purge_plan(lines, gone)
             markers = [
-                {"op": "purge", "id": _marker_id(rid), "reason": "retention", "created_at": now}
+                _stamp({"op": "purge", "id": _marker_id(rid), "reason": "retention"}, now)
                 for rid in doomed
             ]
             _rewrite(path, kept, markers)
@@ -890,9 +1020,7 @@ def retention(path, max_age_days=None, max_active=None, hard=False, drop_attest=
             _append_lines(
                 path,
                 [
-                    json.dumps(
-                        {"op": "forget", "id": rid, "reason": "retention", "created_at": now}
-                    )
+                    json.dumps(_stamp({"op": "forget", "id": rid, "reason": "retention"}, now))
                     for rid in doomed
                 ],
             )
@@ -1081,9 +1209,11 @@ def main(argv=None):
             print("  dry run: nothing changed; add --apply to move these lines out of the op-log")
         return 0
     try:
-        # verify-chain reads a chain file, not an op-log: never repair it, and any
-        # bad line is evidence of tampering
-        events = read_log(args.oplog, repair=args.cmd != "verify-chain")
+        # verify-chain reads a chain file, not an op-log: never repair it, any bad
+        # line is evidence of tampering, and the op-log schema version does not apply
+        events = read_log(
+            args.oplog, repair=args.cmd != "verify-chain", schema=args.cmd != "verify-chain"
+        )
     except OplogError as e:
         if args.cmd == "verify-chain":
             sys.exit(f"TAMPER DETECTED at line {e.lineno}: not a JSON object ({e.category})")
