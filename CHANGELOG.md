@@ -4,6 +4,31 @@ All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) ·
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Op-log schema version 2.** Every event governance writes (soft and hard
+  erase, retention) carries `ts`, an RFC 3339 UTC time with microseconds and
+  a trailing `Z`, and `v: 2`, in place of `created_at`. A line without `v` is
+  version 1. The readers (`audit`, `lineage`, `conflicts`, `summary`, `erase`,
+  `retention`, `attest`) take a time from `created_at`, from an epoch `ts`
+  (version 1) or from an RFC 3339 `ts` (version 2), in memory only; no old
+  line is rewritten. The `audit` time column now also shows the time of
+  version-1 events that carry an epoch `ts` (forget, supersede, flag).
+- **A store written by a newer version is refused.** A line with `v` above 2,
+  or a `v` that is not a positive integer, stops every reader above with an
+  error naming the file, the line and the version found (or its JSON type),
+  before anything is changed. `verify-chain` (a chain file) and
+  `repair --quarantine-bad-lines` (which keeps every JSON object) do not
+  apply it. `amem_attest.build_chain` refuses such an event too.
+- `attest`: the entry `ts` of a version-2 event is the event's own `ts`.
+  Version-1 entries are built exactly as before, so a chain rebuilt from an
+  old op-log keeps its hashes and stays consistent with its anchors.
+
+### Fixed
+- `audit` and `retention --max-age-days` crashed (TypeError) on an add whose
+  `created_at` was a string; such an add now has no time, like a missing one.
+
 ## [0.2.0] — 2026-11-04
 
 The changes below fix residue that a hard `erase` or hard `retention` left
