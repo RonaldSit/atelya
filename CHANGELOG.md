@@ -21,9 +21,18 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   before anything is changed. `verify-chain` (a chain file) and
   `repair --quarantine-bad-lines` (which keeps every JSON object) do not
   apply it. `amem_attest.build_chain` refuses such an event too.
+- `ts` is the authoritative time. The readers take `ts` first and `created_at`
+  only when `ts` is missing or unreadable.
 - `attest`: the entry `ts` of a version-2 event is the event's own `ts`.
   Version-1 entries are built exactly as before, so a chain rebuilt from an
   old op-log keeps its hashes and stays consistent with its anchors.
+
+### Deprecated
+- `created_at` on an `add` is deprecated but still written by atelya, the same
+  instant as the event's `ts`, so that atelya-attest 0.2.0 keeps dating and
+  retiring records written by atelya with schema 2. It will be removed only in
+  the next major version, and only after atelya-attest 0.2.x is no longer
+  supported.
 
 ### Fixed
 - `audit` and `retention --max-age-days` crashed (TypeError) on an add whose

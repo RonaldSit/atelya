@@ -112,7 +112,9 @@ FORMAT_VECTORS = [
 EVENT_TIME_CASES = [
     ({"created_at": 1000.5}, 1000.5),
     ({"created_at": 7}, 7),
-    ({"created_at": 1000.5, "ts": "2026-11-04T12:34:56Z"}, 1000.5),
+    ({"created_at": 1000.5, "ts": "2026-11-04T12:34:56Z"}, _us(2026, 11, 4, 12, 34, 56) / 10**6),
+    ({"created_at": 1000.5, "ts": 2000.25}, 2000.25),
+    ({"created_at": 1000.5, "ts": "not a time"}, 1000.5),
     ({"ts": 2000.25}, 2000.25),
     ({"ts": "1970-01-01T00:16:40.5Z"}, 1000.5),
     ({"created_at": None, "ts": "1970-01-01T00:16:40Z"}, 1000.0),
@@ -303,6 +305,15 @@ MIXED = [
         "ts": "1970-01-01T01:06:40.000000Z",
         "v": 1,
     },
+    {
+        "op": "add",
+        "id": "V4",
+        "text": "neutral v2 disagreeing times",
+        "key": None,
+        "created_at": 5000.0,
+        "ts": "1970-01-01T01:40:00.500000Z",
+        "v": 2,
+    },
 ]
 
 
@@ -318,14 +329,15 @@ def test_replay_reads_every_time_format_in_memory_only(tmp_path):
     p = _mixed(tmp_path)
     before = read_bytes(p)
     rec, order = gov.replay(gov.read_log(p))
-    assert order == ["L1", "D1", "N1", "S1", "V1", "V2"]
+    assert order == ["L1", "D1", "N1", "S1", "V1", "V2", "V4"]
     assert {r: rec[r]["created_at"] for r in order} == {
         "L1": None,
         "D1": 1000.0,
         "N1": None,
         "S1": None,  # A6: a created_at that is not a number is no time
-        "V1": 2000.0,  # created_at wins over ts
+        "V1": 2000.0,  # ts and created_at agree
         "V2": 3000.25,  # a v2 add with ts only
+        "V4": 6000.5,  # ts is authoritative over a created_at that disagrees
     }
     assert read_bytes(p) == before
 
@@ -344,6 +356,7 @@ def test_audit_timeline_time_column_reads_ts(tmp_path):
         _local(3000.25),
         _local(3600.0),
         _local(4000.0),
+        _local(6000.5),
     ]
 
 

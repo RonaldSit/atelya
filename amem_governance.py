@@ -13,9 +13,10 @@ event names records only through id, a, b and holder (REF_FIELDS), and carries r
 HMACs. Older logs may hold key_conflict events with a "text" excerpt and no id, and flags whose
 "why" is text; a hard purge removes them with their record.
 Schema version and time (atelya docs/oplog-schema.md): every event written since schema 2
-carries "ts" (RFC 3339 UTC with microseconds and Z) and "v": 2; an add also keeps
-"created_at" (epoch seconds), so older readers still date it. A line without "v" is version 1.
-Old time formats (created_at or ts as epoch seconds) are read in memory only, never rewritten.
+carries "ts" (RFC 3339 UTC with microseconds and Z) and "v": 2. ts is authoritative; an add
+written by atelya also keeps "created_at" (epoch seconds, deprecated, the same instant as its
+ts), so older readers still date it. A line without "v" is version 1. Readers take ts first;
+old time formats (created_at or ts as epoch seconds) are read in memory only, never rewritten.
 A line with "v" above 2, or a "v" that is not a positive integer, is refused before anything
 is changed, naming the file, the line and the version found.
 Superseded/forgotten records are RETAINED (status change, not removal) => full auditable history.
@@ -236,13 +237,15 @@ def _finite(x):
 
 def event_time(ev):
     """The time of an event in epoch seconds, or None, from every format written so
-    far: created_at (a number), else ts (an epoch number in v1, RFC 3339 in v2). A
-    created_at that is not a number is no time (an old-format line: sorts as 0)."""
-    t = _finite(ev.get("created_at"))
+    far. ts is authoritative: an RFC 3339 ts (v2), else an epoch-number ts (v1), else
+    created_at (a number; deprecated, still written on add by atelya for older
+    readers, always equal to its ts). A created_at that is not a number is no time
+    (an old-format line: sorts as 0)."""
+    t = parse_ts(ev.get("ts"))
     if t is None:
         t = _finite(ev.get("ts"))
     if t is None:
-        t = parse_ts(ev.get("ts"))
+        t = _finite(ev.get("created_at"))
     return t
 
 
@@ -469,7 +472,7 @@ def replay(events):
                 "id": rid,
                 "text": ev.get("text", ""),
                 "key": ev.get("key"),
-                "created_at": event_time(ev),  # created_at, else a v2 ts; None: no time
+                "created_at": event_time(ev),  # ts first, else created_at; None: no time
                 "status": "active",
                 "actor": ev.get("actor") or ev.get("source"),
                 "history": ["add"],
@@ -495,7 +498,7 @@ def audit_timeline(events):
     rows = []
     for i, ev in enumerate(events):
         op = ev.get("op", "add")
-        ts = event_time(ev)  # created_at, or ts in either format
+        ts = event_time(ev)  # ts in either format, else created_at
         when = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(ts)) if ts else ""
         if op == "flag":
             detail = f"contradiction a={ev.get('a')} b={ev.get('b')} why={ev.get('why')}"
