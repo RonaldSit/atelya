@@ -184,3 +184,30 @@ text), then run `attest --v2`. Keep a v1 chain at the default path only while no
 purge is needed. Limits: a chain written elsewhere with `--out` is not reached by a
 purge (verifying it afterwards reports the purged lines as missing; it holds no text);
 `amem_anchor` anchors v1 roots, and anchoring the v2 head is not implemented yet.
+
+## 9. OpenTimestamps: anchoring the v2 head in Bitcoin
+
+`pip install 'atelya-attest[ots]'` (Python 3.11 or later) adds three commands to
+`export-digest`, which needs nothing:
+
+```bash
+atelya-govern export-digest log.jsonl.attest.jsonl
+atelya-govern anchor-ots log.jsonl.attest.jsonl
+atelya-govern upgrade-ots log.jsonl.attest.jsonl.ots
+atelya-govern verify-ots log.jsonl.attest.jsonl.ots log.jsonl.attest.jsonl
+```
+
+- `anchor-ots` sends only the 32-byte v2 head to OpenTimestamps calendars and writes a
+  `.ots` proof and a `.note.json`. Every anchor states the last seq it covers: **lines
+  attested after it are not covered until the next anchor.**
+- `upgrade-ots` fetches the Bitcoin attestation once a block includes it (only from
+  whitelisted calendars). `verify-ots` checks that the proof commits to an entry of the
+  chain, then the attestation against your own bitcoind over RPC; it reports `pending`
+  (exit 3) until then.
+- With `AMEM_PRIVATE=1`, `anchor-ots` and `upgrade-ots` refuse unless `--allow-network` is
+  given: run `export-digest` here and `anchor-ots --digest-file` on another machine.
+
+A Bitcoin attestation proves existence no later than the block's time, not who wrote the
+chain or that its lines are true. Not checked yet: a run against a real Bitcoin regtest
+node, and the live public calendars (the tests use a local fake calendar and a fake
+bitcoind; the official `ots verify` accepts the proofs).

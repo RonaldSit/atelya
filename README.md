@@ -133,8 +133,10 @@ separation of duties is what turns "detects accidents" into "detects insiders".
   (`attest --v2`, [ATTESTATION.md](ATTESTATION.md) §8) stores only digests:
   a hard purge verifies it, then appends a redaction record, and it still
   verifies across the purged positions. Chains written elsewhere with
-  `--out` are not reached by a purge. Anchoring a v2 head is not
-  implemented yet.
+  `--out` are not reached by a purge. The v2 head can be anchored in
+  Bitcoin with OpenTimestamps (`atelya-attest[ots]`, Python 3.11+,
+  [ATTESTATION.md](ATTESTATION.md) §9); every anchor states the last seq
+  it covers.
 - Trust boundary: the verifier is ~200 lines of stdlib Python. Don't trust
   this repo — read it, or rewrite it.
 

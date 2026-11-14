@@ -1,0 +1,14 @@
+# Pins for the [ots] extra and everything it pulls in (atelya web3-features-spec W5).
+# Each release is at least 14 days old (checked 2026-11-14). Newer ones were left out on purpose:
+# pycryptodomex 3.24.2 (2026-11-05) and platformdirs 4.14.4/4.14.5 (2026-11-04).
+# opentimestamps 0.5.0 / opentimestamps-client 0.8.0 (2026-10-27) need Python 3.11 or later and
+# fix calendar-redirect, whitelist-bypass and malformed-proof issues of 0.4.x / 0.7.x.
+opentimestamps==0.5.0
+opentimestamps-client==0.8.0
+python-bitcoinlib==0.12.2
+pycryptodomex==3.24.1
+platformdirs==4.14.0
+GitPython==3.2.1
+gitdb==4.0.12
+smmap==5.0.3
+PySocks==1.7.1

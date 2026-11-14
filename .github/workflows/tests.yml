@@ -28,6 +28,12 @@ jobs:
         run: python -VV
       - name: Install test runner
         run: pip install pytest
+      - name: Install the [ots] extra, pinned (Python 3.11+; 3.10 tests the refusal without it)
+        if: matrix.python-version != '3.10'
+        run: pip install -c tests/ots-constraints.txt opentimestamps opentimestamps-client
+      - name: Require the extra where it can be installed
+        if: matrix.python-version != '3.10'
+        run: echo "ATELYA_REQUIRE_OTS=1" >> "$GITHUB_ENV"
       - name: Run test suite
         run: python -m pytest tests/ -q
 

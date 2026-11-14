@@ -7,6 +7,13 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **OpenTimestamps anchoring of the v2 head** (ATTESTATION.md §9):
+  `export-digest` (no extra), and with the new extra `atelya-attest[ots]`
+  (opentimestamps 0.5.0, opentimestamps-client 0.8.0, Python 3.11+)
+  `anchor-ots`, `upgrade-ots`, `verify-ots`. Only the 32-byte head is sent
+  to calendars; every anchor states the last seq it covers; private mode
+  refuses the network without `--allow-network`; `verify-ots` checks the
+  Bitcoin attestation against your own bitcoind and exits 3 while pending.
 - **Attest v2, a hash-only chain** (ATTESTATION.md §8). `attest --v2` writes
   one entry per op-log line, `{"v": 2, "seq", "line_sha256" | "line_hmac" +
   "keyed": true, "prev"}`, with no payload: a plain SHA-256 of the line's
