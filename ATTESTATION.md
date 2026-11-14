@@ -147,3 +147,40 @@ cryptographic test practice:
 tamper-evident audit logging (hash-chained, EU AI Act Art. 12 record-keeping pattern)".
 Do **not** describe it as "tamper-proof" or "immutable" — reviewers will (correctly)
 push back, and §3 is the honest answer.*
+
+## 8. Attest v2: a hash-only chain, and migrating to it
+
+A v1 chain wraps every op-log event verbatim, so it holds the text of every record and
+blocks hard purges. `attest --v2` writes a chain of digests instead:
+
+- line entry `{"v": 2, "seq": n, "line_sha256" | "line_hmac" + "keyed": true, "prev"}`:
+  the SHA-256 (or HMAC-SHA256 with `<data_dir>/.erasure_key`) of the line's exact
+  bytes; `prev` is the SHA-256 of the previous entry's canonical JSON, `GENESIS` first;
+- redaction record `{"v": 2, "redact": [seq, ...], "purge_marker": <id>, "prev"}`,
+  appended by a hard purge after the lines it covers;
+- head: the SHA-256 of the last entry's canonical JSON. No entry holds any text.
+
+A line gets a plain SHA-256 only when it names its record by a uuid4 (122 random
+bits); any other line could be confirmed by guessing its content, so it is keyed.
+Every id atelya writes today has 48 bits, so today every entry is keyed and verifying
+needs the data directory's `.erasure_key`.
+
+```bash
+atelya-govern attest log.jsonl --v2
+atelya-govern verify-chain log.jsonl.attest.jsonl
+```
+
+`attest --v2` creates the chain or, after checking it, appends the new lines.
+`verify-chain` recomputes every line from the op-log (`--oplog`, or the chain path
+without `.attest.jsonl`) and names the first problem: a modified, reordered, inserted
+or missing line, a redaction naming a line still there or chained before its line, a
+broken link, a missing key. Lines after the chain are reported as not yet attested. A
+hard erase or retention with a v2 chain at the default path verifies it first
+(refusing on a mismatch), purges, and appends one redaction record per purged record;
+`--drop-attest` is not needed. A v1 chain keeps the refusal.
+
+Migrating: move the v1 chain out of the data directory (it still holds every event's
+text), then run `attest --v2`. Keep a v1 chain at the default path only while no hard
+purge is needed. Limits: a chain written elsewhere with `--out` is not reached by a
+purge (verifying it afterwards reports the purged lines as missing; it holds no text);
+`amem_anchor` anchors v1 roots, and anchoring the v2 head is not implemented yet.

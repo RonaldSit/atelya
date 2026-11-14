@@ -212,11 +212,13 @@ def test_an_untouched_oplog_verifies(tmp_path):
     assert out.returncode == 0 and "VERIFIED" in out.stdout, out.stdout + out.stderr
 
 
-def _fail(p, kind, seq=None):
+def _fail(p, kind, seq=None, cli=True):
     r = verify(p)
     assert not r["ok"] and r["error"]["kind"] == kind, r
     if seq is not None:
         assert r["error"]["seq"] == seq, r
+    if not cli:
+        return r
     out = _cli("verify-chain", p + ".attest.jsonl")
     assert out.returncode != 0 and kind in (out.stdout + out.stderr), out.stdout + out.stderr
     return r
@@ -475,3 +477,112 @@ def test_the_standalone_attest_cli_points_a_v2_chain_to_atelya_govern(tmp_path):
     assert out.returncode != 0 and "verify-chain" in (out.stdout + out.stderr), (
         out.stdout + out.stderr
     )
+
+
+# ================================ structure, keys, edges ===========================
+def _relink(chain):
+    """Recompute every prev, so a test isolates one structural problem from broken links."""
+    prev = "GENESIS"
+    for e in chain:
+        e["prev"] = prev
+        prev = hashlib.sha256(attest.canonical(e)).hexdigest()
+    return chain
+
+
+def _write_chain(p, chain):
+    with open(p + ".attest.jsonl", "w", encoding="utf-8") as f:
+        for e in chain:
+            f.write(json.dumps(e) + "\n")
+
+
+@pytest.mark.parametrize(
+    "tamper,kind",
+    [
+        (lambda c: [{"v": 1, **{k: v for k, v in c[0].items() if k != "v"}}] + c[1:], "not_v2"),
+        (lambda c: c[:2] + [dict(c[2], v=3)] + c[3:], "bad_entry"),
+        (lambda c: c[:2] + [dict(c[2], v=True)] + c[3:], "bad_entry"),
+        (lambda c: c[:2] + [dict(c[2], seq=7)] + c[3:], "bad_entry"),
+        (
+            lambda c: c[:1] + [dict(c[1], seq=True)] + c[2:],
+            "bad_entry",
+        ),  # True == 1: the bool check
+        (lambda c: c[:2] + [dict(c[2], line_hmac="zz" * 32)] + c[3:], "bad_entry"),
+        (lambda c: c[:2] + [dict(c[2], keyed="yes")] + c[3:], "bad_entry"),
+        (lambda c: c[:2] + [dict(c[2], note="x")] + c[3:], "bad_entry"),
+        (lambda c: c + [{"v": 2, "redact": [], "purge_marker": "a1", "prev": ""}], "bad_entry"),
+        (lambda c: c + [{"v": 2, "redact": ["1"], "purge_marker": "a1", "prev": ""}], "bad_entry"),
+        (lambda c: c + [{"v": 2, "redact": [True], "purge_marker": "a1", "prev": ""}], "bad_entry"),
+    ],
+)
+def test_malformed_entries_are_named(tmp_path, tamper, kind):
+    p = write_oplog(tmp_path)
+    attest_v2(p)
+    _write_chain(p, _relink(tamper(chain_of(p))))
+    _fail(p, kind, cli=kind != "not_v2")  # the CLI reads a chain whose first entry is not v2 as v1
+
+
+def test_detects_the_last_attested_line_deleted(tmp_path):
+    p = write_oplog(tmp_path)
+    attest_v2(p)
+    write_raw(p, raw_lines(p)[:-1])
+    _fail(p, "missing_line", 4)
+
+
+def test_a_keyed_line_without_a_key_is_refused_when_building():
+    raw = json.dumps({"op": "add", "id": "a1", "text": "x"}).encode()
+    with pytest.raises(ValueError, match="erasure_key"):
+        attest.extend_chain_v2([], [(raw, json.loads(raw))], None)
+
+
+def test_a_key_of_the_wrong_length_is_refused(tmp_path):
+    p = write_oplog(tmp_path)
+    attest_v2(p)
+    with open(os.path.join(str(tmp_path), ".erasure_key"), "wb") as f:
+        f.write(b"short")
+    with pytest.raises(RuntimeError, match="32-byte"):
+        verify(p)
+
+
+def test_verify_changes_nothing_and_moves_no_torn_tail(tmp_path):
+    p = write_oplog(tmp_path)
+    attest_v2(p)
+    with open(p, "ab") as f:
+        f.write(b'{"op": "add", "id": "a9", "te')
+    before = (open(p, "rb").read(), open(p + ".attest.jsonl", "rb").read())
+    with pytest.raises(gov.OplogError):
+        verify(p)
+    assert (open(p, "rb").read(), open(p + ".attest.jsonl", "rb").read()) == before
+    assert not os.path.exists(p + ".torn")
+
+
+def test_an_old_key_conflict_excerpt_is_redacted_with_its_record(tmp_path):
+    old = {"op": "key_conflict", "key": "k", "reason": "fragment", "text": TEXTS["a2"][:30]}
+    p = write_oplog(tmp_path, extra=[old])
+    attest_v2(p)
+    out = gov.erase(p, "green door", hard=True)
+    assert out["attest_redacted"] == [1, 4, 5], out
+    assert [e["redact"] for e in chain_of(p) if "redact" in e] == [[1, 4, 5]]
+    assert verify(p)["ok"]
+
+
+def test_a_purge_with_a_v2_chain_keeps_the_chain(tmp_path):
+    p = write_oplog(tmp_path)
+    attest_v2(p)
+    out = gov.erase(p, "green door", hard=True)
+    assert "attest_dropped" not in out and os.path.exists(p + ".attest.jsonl"), out
+    assert "user.jsonl.attest.jsonl" not in out.get("cleaned", []), out
+
+
+def test_a_failed_rewrite_leaves_the_oplog_and_the_chain_consistent(tmp_path, monkeypatch):
+    p = write_oplog(tmp_path)
+    attest_v2(p)
+    before = (open(p, "rb").read(), open(p + ".attest.jsonl", "rb").read())
+
+    def full_disk(*a, **k):
+        raise OSError(28, "No space left on device (test)")
+
+    monkeypatch.setattr(gov, "_rewrite", full_disk)
+    with pytest.raises(OSError):
+        gov.erase(p, "green door", hard=True)
+    assert (open(p, "rb").read(), open(p + ".attest.jsonl", "rb").read()) == before
+    assert verify(p)["ok"]

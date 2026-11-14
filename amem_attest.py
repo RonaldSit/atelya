@@ -249,7 +249,7 @@ def verify_chain_v2(chain, lines, line_key):
 
     entries, redacted, prev = [], set(), GENESIS
     for i, e in enumerate(chain):
-        if not isinstance(e, dict) or e.get("v") != CHAIN_V2 or isinstance(e.get("v"), bool):
+        if not isinstance(e, dict) or e.get("v") != CHAIN_V2:  # True == 1, never 2
             return fail("not_v2" if i == 0 else "bad_entry", detail=f"chain entry {i}")
         if e.get("prev") != prev:
             return fail("broken_link", seq=e.get("seq"), detail=f"chain entry {i}: prev mismatch")

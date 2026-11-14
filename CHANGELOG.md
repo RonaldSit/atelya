@@ -7,6 +7,21 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Attest v2, a hash-only chain** (ATTESTATION.md §8). `attest --v2` writes
+  one entry per op-log line, `{"v": 2, "seq", "line_sha256" | "line_hmac" +
+  "keyed": true, "prev"}`, with no payload: a plain SHA-256 of the line's
+  exact bytes when the line names its record by a uuid4 (122 random bits),
+  else HMAC-SHA256 with `<data_dir>/.erasure_key` (atelya's ids have 48
+  bits today, so its lines are keyed). Re-running it verifies, then appends.
+  `verify-chain` reads v1 and v2; a v2 chain is checked against its op-log
+  (`--oplog`) and the first problem is named (modified, reordered, inserted
+  or missing line, a redaction naming a line still there or chained before
+  it, a broken link, a missing key). A hard erase or retention with a v2
+  chain at the default path verifies it, purges, and appends one redaction
+  record per purged record; `--drop-attest` is not needed. v1 chains keep
+  the refusal; `attest` without `--v2` will not overwrite a v2 chain. The
+  standalone `amem_attest.py verify`/`root` point a v2 chain to
+  `atelya-govern verify-chain`. Anchoring a v2 head is not implemented yet.
 - **Op-log schema version 2.** Every event governance writes (soft and hard
   erase, retention) carries `ts`, an RFC 3339 UTC time with microseconds and
   a trailing `Z`, and `v: 2`, in place of `created_at`. A line without `v` is

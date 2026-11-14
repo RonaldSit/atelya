@@ -125,14 +125,16 @@ separation of duties is what turns "detects accidents" into "detects insiders".
   pass: the tool fails and lists the labels the ledger actually holds.
 - Hard-erase removes the record from the op-log and its side files but never
   the fact of erasure: a purge marker (an HMAC of the pattern, never the
-  text) stays in the op-log. The chain stores every event verbatim, so a hard
-  purge refuses while the default chain file (`<oplog>.attest.jsonl`) exists;
-  `--drop-attest` deletes it, with the history it recorded. A chain built
-  after the purge starts again from GENESIS, so checking it against a root
-  anchored before the purge reports ANCHOR CONFLICT, as for any rewrite.
-  Chains written elsewhere with `--out` are neither checked nor cleaned. A
-  chain that stores only hashes and can be verified across purged positions
-  (attest v2) is not implemented.
+  text) stays in the op-log. A v1 chain stores every event verbatim, so a
+  hard purge refuses while a v1 chain is at the default path
+  (`<oplog>.attest.jsonl`); `--drop-attest` deletes it, with the history it
+  recorded, and a chain built after the purge starts again from GENESIS
+  (an anchored root then reports ANCHOR CONFLICT). A v2 chain
+  (`attest --v2`, [ATTESTATION.md](ATTESTATION.md) §8) stores only digests:
+  a hard purge verifies it, then appends a redaction record, and it still
+  verifies across the purged positions. Chains written elsewhere with
+  `--out` are not reached by a purge. Anchoring a v2 head is not
+  implemented yet.
 - Trust boundary: the verifier is ~200 lines of stdlib Python. Don't trust
   this repo — read it, or rewrite it.
 
