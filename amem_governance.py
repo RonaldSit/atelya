@@ -43,6 +43,8 @@ CLI:
   python amem_governance.py attest    <oplog.jsonl> --v2 [--out chain.jsonl]
   python amem_governance.py verify-chain <chain.jsonl> [--key K|--keyfile F]
   python amem_governance.py verify-chain <chain.jsonl> [--oplog <oplog.jsonl>]
+  python amem_governance.py list-quarantine <oplog.jsonl>
+  python amem_governance.py release <oplog.jsonl> --id <rid>
   python amem_governance.py export-digest <chain.jsonl> [--out digest.txt]
   python amem_governance.py anchor-ots <chain.jsonl> [--calendar URL] [--allow-network]
   python amem_governance.py anchor-ots --digest-file <digest.txt> [--calendar URL] [--allow-network]
@@ -73,6 +75,12 @@ line from the op-log (--oplog, or the chain path without .attest.jsonl) and name
 problem: a modified, reordered, inserted or missing line, a redaction naming a line that
 still exists, a broken link or a missing key. Lines after the chain are reported as not yet
 attested.
+
+Quarantine (atelya docs/trust-recall.md): atelya hides a record below user trust whose text
+holds a wallet address, and writes {"op":"quarantine","id","reason":"payment_content"} for it.
+list-quarantine prints the ids still quarantined (ids only, never text). release writes
+{"op":"release","id","reason":"operator"}: the record is re-certified as user and appears in
+recall again. That is the operator's decision; nothing releases a record on its own.
 
 OpenTimestamps (atelya docs/ots.md; needs atelya-attest[ots], Python 3.11 or later): explicit
 commands only, nothing runs on its own. export-digest writes the v2 chain head (32 bytes, hex)
@@ -1101,6 +1109,39 @@ def verify_ots(proof, chain_path=None, digest_file=None, bitcoin_node=None, btc_
     raise OtsError("no Bitcoin attestation verified: " + "; ".join(problems))
 
 
+# ---- payment-content quarantine (atelya web3-features-spec W7) ---------------------------
+def list_quarantine(path):
+    """{"quarantined": [ids]}: records with a quarantine event and no release after it,
+    that the op-log still holds. Ids only."""
+    events = [ev for _n, ev in read_events(path)]
+    rec, _order = replay([_promote(ev) for ev in events])
+    held = []
+    for ev in events:
+        rid = ev.get("id")
+        if not isinstance(rid, str):
+            continue
+        if ev.get("op") == "quarantine" and rid not in held:
+            held.append(rid)
+        elif ev.get("op") == "release" and rid in held:
+            held.remove(rid)
+    return {"quarantined": [r for r in held if r in rec and rec[r]["status"] != "purged"]}
+
+
+def release(path, rid):
+    """Re-certify a record as user (the operator's decision): append a content-free
+    release event and bump the purge epoch so running doors reload."""
+    with oplog_lock(path):
+        events = [ev for _n, _raw, ev in _load_lines(path) if ev is not None]
+        rec, _order = replay([_promote(ev) for ev in events])
+        if rid not in rec or rec[rid]["status"] == "purged":
+            return {"released": None, "reason": f"no record {rid!r} in {path}"}
+        _append_lines(
+            path, [json.dumps(_stamp({"op": "release", "id": rid, "reason": "operator"}))]
+        )
+        _bump_epoch(path)
+    return {"released": rid}
+
+
 def _attest_guard(path, drop_attest):
     """Refuse a hard purge while the default v1 attest chain exists: it stores every
     event verbatim, so the purged text would stay in it. drop_attest deletes it.
@@ -1664,6 +1705,8 @@ def main(argv=None):
             "anchor-ots",
             "upgrade-ots",
             "verify-ots",
+            "list-quarantine",
+            "release",
         ],
     )
     parser.add_argument("oplog", nargs="?")
@@ -1804,6 +1847,23 @@ def main(argv=None):
                 sys.exit(f"TAMPER DETECTED at seq={bad}: {reason}")
         return 0
 
+    if args.cmd == "list-quarantine":
+        r = list_quarantine(args.oplog)
+        print(json.dumps(r))
+        for rid in r["quarantined"]:
+            print(f"  {rid}")
+        if not r["quarantined"]:
+            print("  nothing is quarantined")
+        return 0
+    if args.cmd == "release":
+        if not args.id:
+            sys.exit("release needs --id <rid>")
+        r = release(args.oplog, args.id)
+        print(json.dumps(r))
+        if r["released"] is None:
+            sys.exit(r["reason"])
+        print(f"  {r['released']} is re-certified as user and appears in recall again")
+        return 0
     if args.cmd == "audit":
         rows = audit_timeline(events)
         if args.out:
