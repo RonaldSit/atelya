@@ -40,7 +40,9 @@ CLI:
   python amem_governance.py erase   <oplog.jsonl> --match <regex> [--hard [--drop-attest]]
   python amem_governance.py retention <oplog.jsonl> --max-age-days N [--hard [--drop-attest]]
   python amem_governance.py attest    <oplog.jsonl> [--out chain.jsonl] [--key K|--keyfile F]
+  python amem_governance.py attest    <oplog.jsonl> --v2 [--out chain.jsonl]
   python amem_governance.py verify-chain <chain.jsonl> [--key K|--keyfile F]
+  python amem_governance.py verify-chain <chain.jsonl> [--oplog <oplog.jsonl>]
   python amem_governance.py repair --quarantine-bad-lines <oplog.jsonl> [--apply]
   python amem_governance.py --selftest
 
@@ -50,9 +52,21 @@ holds HMAC-SHA256 of the erase pattern with <data dir>/.erasure_key (created on 
 mode 0600, not enforced on Windows, where the file relies on the ACL of the data directory's
 location; never deleted by erase or retention; back it up with the data directory, or
 existing HMACs can no longer be checked; markers written before hold a plain SHA-256 and are
-left as they are). It refuses while <oplog>.attest.jsonl exists, because that chain stores
-every event verbatim; --drop-attest deletes the chain file first. Chains written elsewhere
-with --out are not checked.
+left as they are). With a v1 chain at <oplog>.attest.jsonl it refuses, because that chain
+stores every event verbatim; --drop-attest deletes the chain file first. With a v2 chain
+there (attest --v2: hashes only) it first verifies the chain against the op-log (refusing
+on any mismatch), then appends one redaction record per purged record naming the seqs of
+the attested lines it removed. Chains written elsewhere with --out are not checked.
+
+Attest v2 (attest --v2; atelya docs/attest-v2.md): one entry per op-log line holding only a
+digest of the line's exact bytes: a plain SHA-256 when the line names its record by a uuid4
+(122 random bits), else HMAC-SHA256 with <data dir>/.erasure_key (every id atelya writes
+today has 48 bits, so verifying those entries needs that key). Re-running attest --v2
+verifies the chain, then appends entries for the new lines. verify-chain recomputes every
+line from the op-log (--oplog, or the chain path without .attest.jsonl) and names the first
+problem: a modified, reordered, inserted or missing line, a redaction naming a line that
+still exists, a broken link or a missing key. Lines after the chain are reported as not yet
+attested.
 Post-purge hooks: after every HARD erase/retention, each installed entry point
 in the group "atelya.purge_hooks" is called with the op-log path, the purged
 record ids with SHA-256 digests of their texts, and (erase only) the matcher.
@@ -632,6 +646,123 @@ class AttestPresent(ValueError):
     """A hard purge would leave the purged text in the default attest chain file."""
 
 
+class ChainMismatch(ValueError):
+    """An attest v2 chain does not match its op-log (or cannot be checked): attest --v2
+    will not extend it and a hard purge will not redact over it."""
+
+
+def _attest_module():
+    try:
+        import amem_attest
+    except ImportError:  # loaded from another directory: use the copy next to this file
+        import importlib.util
+
+        here = os.path.join(os.path.dirname(os.path.abspath(__file__)), "amem_attest.py")
+        spec = importlib.util.spec_from_file_location("amem_attest", here)
+        amem_attest = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(amem_attest)
+    return amem_attest
+
+
+def _existing_key(data_dir):
+    """The data directory's .erasure_key, or None when there is none. Never creates it."""
+    path = os.path.join(data_dir, ERASURE_KEY_NAME)
+    try:
+        with open(path, "rb") as f:
+            key = f.read()
+    except FileNotFoundError:
+        return None
+    if len(key) != 32:
+        raise RuntimeError(f"{path}: not a 32-byte key; refusing to compute HMACs with it")
+    return key
+
+
+def _is_v2_chain_file(chain_path):
+    """True when the chain file's first entry is an attest v2 entry."""
+    with open(chain_path, "rb") as f:
+        for raw in f:
+            if raw.strip():
+                cat, ev = classify(raw.rstrip(b"\n"))
+                return cat is None and ev.get("v") == 2 and not isinstance(ev.get("v"), bool)
+    return False
+
+
+def _read_chain(chain_path):
+    return [ev for _n, ev in read_events(chain_path, repair=False, schema=False)]
+
+
+def _verify_lines_v2(chain, lines, key):
+    """verify_chain_v2 over _load_lines output; the error also names the file line."""
+    pairs = [(raw, ev) for _n, raw, ev in lines if ev is not None]
+    linenos = [n for n, _raw, ev in lines if ev is not None]
+    report = _attest_module().verify_chain_v2(chain, pairs, key)
+    err = report["error"]
+    if err and err.get("line") is not None:
+        err["lineno"] = linenos[err["line"]]
+    return report, pairs
+
+
+def _chain_problem(chain_path, oplog_path, report):
+    e = report["error"]
+    where = f" at seq={e['seq']}" if e.get("seq") is not None else ""
+    where += f", {oplog_path} line {e['lineno']}" if e.get("lineno") is not None else ""
+    return f"{chain_path} does not match {oplog_path}: {e['kind']}{where}" + (
+        f" ({e['detail']})" if e.get("detail") else ""
+    )
+
+
+def attest_v2(path, out=None):
+    """Create or extend the attest v2 chain of an op-log (default <oplog>.attest.jsonl).
+    An existing chain must be v2 and must match the op-log; then entries for the lines
+    after it are appended. Holds <path>.lock. Returns chain, appended, last_seq, head."""
+    att = _attest_module()
+    chain_path = out or path + ATTEST_SUFFIX
+    data_dir = os.path.dirname(os.path.abspath(path))
+    with oplog_lock(path):
+        lines = _load_lines(path)
+        chain = _read_chain(chain_path) if os.path.exists(chain_path) else []
+        if chain and not att.is_v2(chain):
+            raise ChainMismatch(
+                f"{chain_path} is a v1 chain (it stores every event verbatim); attest --v2 does "
+                "not extend it. Move it out of the way, or choose another --out, to start a v2 chain."
+            )
+        if chain:
+            key = _existing_key(data_dir)
+            report, pairs = _verify_lines_v2(chain, lines, key)
+            if not report["ok"]:
+                raise ChainMismatch(_chain_problem(chain_path, path, report))
+            start = len(pairs) - report["unattested"]
+        else:
+            key = erasure_key(data_dir)
+            pairs, start = [(raw, ev) for _n, raw, ev in lines if ev is not None], 0
+        new = att.extend_chain_v2(chain, pairs[start:], key)[len(chain) :]
+        with open(chain_path, "a", encoding="utf-8") as f:
+            for e in new:
+                f.write(json.dumps(e) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+    full = chain + new
+    last = next((e["seq"] for e in reversed(full) if "seq" in e), None)
+    return {
+        "chain": chain_path,
+        "appended": len(new),
+        "last_seq": last,
+        "head": att.chain_head_v2(full),
+    }
+
+
+def verify_v2(chain_path, oplog_path):
+    """The verify_chain_v2 report of a v2 chain against its op-log (read only: the key is
+    read, never created, and a torn tail is not moved)."""
+    chain = _read_chain(chain_path)
+    report, _pairs = _verify_lines_v2(
+        chain,
+        _load_lines(oplog_path, repair=False),
+        _existing_key(os.path.dirname(os.path.abspath(oplog_path))),
+    )
+    return report
+
+
 def erasure_key(data_dir):
     """The data directory's key for HMACs written to disk: 32 random bytes in
     <data_dir>/.erasure_key, created here on first need (O_CREAT|O_EXCL, mode 0600).
@@ -666,13 +797,16 @@ def _hmac_hex(oplog_path, value):
 
 
 def _attest_guard(path, drop_attest):
-    """Refuse a hard purge while the default attest chain exists: it stores every
+    """Refuse a hard purge while the default v1 attest chain exists: it stores every
     event verbatim, so the purged text would stay in it. drop_attest deletes it.
-    Returns True when it was deleted. Chain files written elsewhere (--out) are
-    not checked."""
+    Returns True when it was deleted, "v2" for a v2 chain (hashes only: the purge
+    appends redaction records instead), else False. Chain files written elsewhere
+    (--out) are not checked."""
     chain = path + ATTEST_SUFFIX
     if not os.path.exists(chain):
         return False
+    if _is_v2_chain_file(chain):
+        return "v2"
     if not drop_attest:
         raise AttestPresent(
             f"{chain} exists: an attest chain stores every op-log event verbatim, including "
@@ -703,11 +837,12 @@ def _record_ids(lines):
 
 
 def _purge_plan(lines, targets):
-    """(kept raw lines, {id: [texts]}, ids kept) for a hard purge of `targets`.
-    Dropped: the add line of each target (an id-less old-format line by its replay
-    id), every event naming a target in REF_FIELDS, and every old key_conflict (no
-    id, written before ids were added to it) whose text excerpt is a prefix of a
-    purged text, with no minimum length. Every other line is kept unchanged."""
+    """(kept raw lines, {id: [texts]}, ids kept, {line index: [targets]}) for a hard
+    purge of `targets`. Dropped: the add line of each target (an id-less old-format
+    line by its replay id), every event naming a target in REF_FIELDS, and every old
+    key_conflict (no id, written before ids were added to it) whose text excerpt is a
+    prefix of a purged text, with no minimum length. Every other line is kept
+    unchanged. The last item names, for each dropped line, the targets it belongs to."""
     rids = _record_ids(lines)
     texts = {rid: [] for rid in targets}
     for i, (_n, _raw, ev) in enumerate(lines):
@@ -722,26 +857,70 @@ def _purge_plan(lines, targets):
         ):
             if t not in texts[rid]:
                 texts[rid].append(t)
-    purged = [t for ts in texts.values() for t in ts if t]
-    kept, kept_ids = [], set()
+    kept, kept_ids, removed = [], set(), {}
     for i, (_n, raw, ev) in enumerate(lines):
         if ev is not None:
-            if rids[i] in targets:
-                continue
-            if any(isinstance(ev.get(f), str) and ev.get(f) in targets for f in REF_FIELDS):
-                continue
+            why = {rids[i]} if rids[i] in targets else set()
+            why.update(
+                ev.get(f) for f in REF_FIELDS if isinstance(ev.get(f), str) and ev.get(f) in targets
+            )
             ex = ev.get("text")  # only old key_conflict events carry one
-            if (
-                ev.get("op") == "key_conflict"
-                and isinstance(ex, str)
-                and ex
-                and any(t.startswith(ex) for t in purged)
-            ):
+            if ev.get("op") == "key_conflict" and isinstance(ex, str) and ex:
+                why.update(
+                    rid for rid, ts in texts.items() if any(t and t.startswith(ex) for t in ts)
+                )
+            if why:
+                removed[i] = sorted(why, key=str)
                 continue
             if rids[i] is not None:
                 kept_ids.add(rids[i])
         kept.append(raw)
-    return kept, texts, kept_ids
+    return kept, texts, kept_ids, removed
+
+
+def _v2_precheck(path, lines, guard):
+    """Before a hard purge with a v2 chain: the chain must match the op-log. Returns
+    (chain, {line index: seq}) or None without a v2 chain."""
+    if guard != "v2":
+        return None
+    chain_path = path + ATTEST_SUFFIX
+    chain = _read_chain(chain_path)
+    report, _pairs = _verify_lines_v2(
+        chain, lines, _existing_key(os.path.dirname(os.path.abspath(path)))
+    )
+    if not report["ok"]:
+        raise ChainMismatch(
+            _chain_problem(chain_path, path, report) + "; refusing to purge (nothing was changed)"
+        )
+    seq_at, k = {}, 0
+    for i, (_n, _raw, ev) in enumerate(lines):
+        if ev is not None:
+            seq_at[i] = report["seq_of_line"][k]
+            k += 1
+    return chain, seq_at
+
+
+def _v2_redact(path, v2, removed, targets):
+    """After a hard purge with a v2 chain: one redaction record per purged record that
+    had attested lines removed, appended to the chain. Returns the redacted seqs."""
+    if v2 is None:
+        return None
+    att = _attest_module()
+    chain, seq_at = v2
+    new, everything = [], set()
+    for rid in sorted(targets, key=str):
+        seqs = {seq_at[i] for i, why in removed.items() if rid in why and seq_at[i] is not None}
+        if seqs:
+            rec = att.redaction_v2(chain + new, seqs, _marker_id(rid))
+            new.append(rec)
+            everything |= seqs
+    if new:
+        with open(path + ATTEST_SUFFIX, "a", encoding="utf-8") as f:
+            for e in new:
+                f.write(json.dumps(e) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+    return sorted(everything)
 
 
 def text_forms(text):
@@ -920,8 +1099,10 @@ def erase(path, pattern, hard=False, drop_attest=False):
     drop_attest. The read and the write hold <path>.lock; a hard purge keeps every
     other line byte for byte; hooks run after the lock is released."""
     regex = re.compile(pattern, re.I)
+    redacted = None
     with oplog_lock(path):
-        attest_dropped = _attest_guard(path, drop_attest) if hard else False
+        guard = _attest_guard(path, drop_attest) if hard else False
+        attest_dropped = guard is True
         lines = _load_lines(path)
         events = [_promote(ev) for _n, _raw, ev in lines if ev is not None]
         targets = set(_match_ids(events, pattern))
@@ -941,7 +1122,8 @@ def erase(path, pattern, hard=False, drop_attest=False):
             return {"matched": len(targets), "mode": "soft", "ids": sorted(targets)}
         n_vec, side, digests = 0, {}, {}
         if targets:
-            kept, texts, kept_ids = _purge_plan(lines, targets)
+            v2 = _v2_precheck(path, lines, guard)
+            kept, texts, kept_ids, removed = _purge_plan(lines, targets)
             mark = "erasure:hmac-sha256:" + _hmac_hex(path, pattern)
             markers = [
                 _stamp(
@@ -955,6 +1137,7 @@ def erase(path, pattern, hard=False, drop_attest=False):
                 for rid in sorted(targets)
             ]
             _rewrite(path, kept, markers)
+            redacted = _v2_redact(path, v2, removed, targets)
             _bump_epoch(path)  # F3c
             n_vec = _purge_vec(path, targets, keep_ids=kept_ids)  # F3a: the embeddings too
             side = _scrub_side_files(path, [t for ts in texts.values() for t in ts])
@@ -971,6 +1154,8 @@ def erase(path, pattern, hard=False, drop_attest=False):
             "side_lines_purged": sum(side.values()),
             "hooks": hooks,
         }
+    if redacted is not None:
+        out["attest_redacted"] = redacted
     if attest_dropped:
         out["attest_dropped"] = True
     cleaned = _cleaned_names(path, bool(targets), n_vec, side, attest_dropped)
@@ -984,8 +1169,10 @@ def retention(path, max_age_days=None, max_active=None, hard=False, drop_attest=
     as a hard erase (_purge_plan, side files, attest guard). The read and the write
     hold <path>.lock; a hard purge keeps every other line byte for byte; hooks run
     after the lock is released."""
+    redacted = None
     with oplog_lock(path):
-        attest_dropped = _attest_guard(path, drop_attest) if hard else False
+        guard = _attest_guard(path, drop_attest) if hard else False
+        attest_dropped = guard is True
         lines = _load_lines(path)
         events = [_promote(ev) for _n, _raw, ev in lines if ev is not None]
         rec, order = replay(events)
@@ -1009,12 +1196,14 @@ def retention(path, max_age_days=None, max_active=None, hard=False, drop_attest=
                 return {"retired": 0, "mode": "soft"}
         elif hard:
             gone = set(doomed)
-            kept, texts, kept_ids = _purge_plan(lines, gone)
+            v2 = _v2_precheck(path, lines, guard)
+            kept, texts, kept_ids, removed = _purge_plan(lines, gone)
             markers = [
                 _stamp({"op": "purge", "id": _marker_id(rid), "reason": "retention"}, now)
                 for rid in doomed
             ]
             _rewrite(path, kept, markers)
+            redacted = _v2_redact(path, v2, removed, gone)
             _bump_epoch(path)  # F3c
             n_vec = _purge_vec(path, gone, keep_ids=kept_ids)  # F3a: the embeddings too
             side = _scrub_side_files(path, [t for ts in texts.values() for t in ts])
@@ -1033,6 +1222,8 @@ def retention(path, max_age_days=None, max_active=None, hard=False, drop_attest=
     out = {"retired": 0, "mode": "hard", "hooks": hooks}
     if doomed:
         out = {"retired": len(doomed), "mode": "hard", "ids": doomed, "hooks": hooks}
+    if redacted is not None:
+        out["attest_redacted"] = redacted
     if attest_dropped:
         out["attest_dropped"] = True
     cleaned = _cleaned_names(path, bool(doomed), n_vec, side, attest_dropped)
@@ -1179,6 +1370,8 @@ def main(argv=None):
     parser.add_argument("--quarantine-bad-lines", action="store_true")
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--drop-attest", action="store_true")
+    parser.add_argument("--v2", action="store_true")
+    parser.add_argument("--oplog", dest="chain_oplog")
     # parse_intermixed_args, not parse_args: on Python 3.10, 3.11, 3.12.0-3.12.6 and
     # 3.13.0, parse_args gives the optional "oplog" positional zero strings when an
     # option follows the subcommand, then rejects the path as unrecognized, so
@@ -1236,9 +1429,44 @@ def main(argv=None):
         elif os.environ.get("AMEM_ATTEST_KEY"):
             _key = os.environ["AMEM_ATTEST_KEY"].encode("utf-8")
         _mode = "HMAC-SHA256" if _key else "SHA-256"
+        if args.cmd == "attest" and args.v2:
+            try:
+                r = attest_v2(args.oplog, out=args.out)
+            except ChainMismatch as e:
+                sys.exit(str(e))
+            print(
+                f"attest v2: {r['appended']} new entries -> {r['chain']} (last seq {r['last_seq']})"
+            )
+            print(f"head (commitment): {r['head']}")
+            print("hashes only; keyed entries need <data dir>/.erasure_key to verify.")
+            return 0
+        if args.cmd == "verify-chain" and _att.is_v2(events):
+            oplog = args.chain_oplog
+            if not oplog and args.oplog.endswith(ATTEST_SUFFIX):
+                oplog = args.oplog[: -len(ATTEST_SUFFIX)]
+            if not oplog:
+                sys.exit(
+                    "an attest v2 chain is verified against its op-log: add --oplog <oplog.jsonl>"
+                )
+            try:
+                r = verify_v2(args.oplog, oplog)
+            except (OplogError, OSError, RuntimeError) as e:
+                sys.exit(f"cannot verify {args.oplog} against {oplog}: {e}")
+            if not r["ok"]:
+                sys.exit("TAMPER DETECTED " + _chain_problem(args.oplog, oplog, r))
+            print(
+                f"VERIFIED — attest v2: {r['verified']} lines verified, {r['redacted']} redacted, "
+                f"{r['unattested']} not yet attested; head={r['head']}"
+            )
+            return 0
         if args.cmd == "attest":
-            chain = _att.build_chain(events, _key)
             out = args.out or (args.oplog + ".attest.jsonl")
+            if os.path.exists(out) and _is_v2_chain_file(out):
+                sys.exit(
+                    f"{out} is an attest v2 chain; attest without --v2 would replace it with a v1 "
+                    "chain. Run attest --v2 to extend it."
+                )
+            chain = _att.build_chain(events, _key)
             with open(out, "w", encoding="utf-8") as f:
                 for e in chain:
                     f.write(json.dumps(e, ensure_ascii=False) + "\n")
@@ -1284,7 +1512,7 @@ def main(argv=None):
             record = erase(args.oplog, args.match, hard=args.hard, drop_attest=args.drop_attest)
         except re.error as e:
             sys.exit(f"invalid --match regex: {e}")
-        except (OplogError, AttestPresent) as e:
+        except (OplogError, AttestPresent, ChainMismatch) as e:
             sys.exit(str(e))
         print(json.dumps(record, ensure_ascii=False, default=str))
         if not record["matched"]:  # never echo the pattern: it may be the text to erase
@@ -1305,7 +1533,7 @@ def main(argv=None):
                 hard=args.hard,
                 drop_attest=args.drop_attest,
             )
-        except (OplogError, AttestPresent) as e:
+        except (OplogError, AttestPresent, ChainMismatch) as e:
             sys.exit(str(e))
         print(json.dumps(record, ensure_ascii=False, default=str))
         return _print_hooks(record, args.hard)
