@@ -7,6 +7,16 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Quarantine commands** for atelya's payment-content quarantine (atelya
+  records below user trust whose text holds a wallet address are hidden from
+  recall and logged as `{"op": "quarantine", "id", "reason":
+  "payment_content"}`). `list-quarantine <oplog>` prints the ids still
+  quarantined: ids only, never text. `release <oplog> --id <rid>` is the
+  operator's decision to re-certify one record as user: it appends
+  `{"op": "release", "id", "reason": "operator"}` (with `ts` and `v: 2`)
+  under the op-log lock and bumps the purge epoch so running doors reload;
+  an unknown or purged id writes nothing and exits 1. A hard purge removes
+  both event types with the record (they name it in `id`).
 - **OpenTimestamps anchoring of the v2 head** (ATTESTATION.md §9):
   `export-digest` (no extra), and with the new extra `atelya-attest[ots]`
   (opentimestamps 0.5.0, opentimestamps-client 0.8.0, Python 3.11+)
