@@ -68,6 +68,7 @@ TOOLS = {
             "--max-active",
             "--key",
             "--keyfile",
+            "--oplog",
         },
         "flags": {
             "--hard",
@@ -75,6 +76,7 @@ TOOLS = {
             "--quarantine-bad-lines",
             "--apply",
             "--drop-attest",
+            "--v2",
             "--help",
         },
         "no_path": set(),
@@ -385,7 +387,13 @@ def _concrete(tool, shape, d):
         if cmd == "verify-chain":
             _ok(_run("govern", ["attest", oplog, "--out", chain, *_key_args(opts, keyfile)], d))
         values.update(
-            {"--id": "r1", "--match": "walrus", "--max-age-days": "36500", "--max-active": "10"}
+            {
+                "--id": "r1",
+                "--match": "walrus",
+                "--max-age-days": "36500",
+                "--max-active": "10",
+                "--oplog": oplog,
+            }
         )
         return _fill(shape, chain if cmd == "verify-chain" else oplog, values), ctx
     if tool == "attest":

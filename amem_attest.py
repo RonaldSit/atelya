@@ -39,6 +39,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import sys
 import time
 import uuid
@@ -148,6 +149,183 @@ def root_of(chain):
     return chain[-1]["curr_hash"] if chain else GENESIS
 
 
+# ---- attest v2: a hash-only chain (atelya web3-features-spec W3) -------------------------
+# Line entry:  {"v": 2, "seq": n, "line_sha256": <sha256 of the exact op-log line bytes, newline
+#               excluded>, "prev": <sha256 of the previous entry's canonical JSON, or GENESIS>}
+#              or, for a line whose content could be confirmed by guessing,
+#              {"v": 2, "seq": n, "line_hmac": <HMAC-SHA256 with <data_dir>/.erasure_key>,
+#               "keyed": true, "prev": ...}. No payload: the chain holds no text.
+# Redaction:   {"v": 2, "redact": [seq, ...], "purge_marker": <id>, "prev": ...}, appended by a
+#              hard purge after the lines it covers.
+# Head:        sha256 of the last entry's canonical JSON (what an anchor commits to).
+# Verifying keyed entries needs the data directory's .erasure_key; plain ones do not.
+CHAIN_V2 = 2
+_UUID4_HEX = re.compile(r"[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}")
+_HEX64 = re.compile(r"[0-9a-f]{64}")
+_LINE_KEYS = (
+    frozenset(("v", "seq", "line_sha256", "prev")),
+    frozenset(("v", "seq", "line_hmac", "keyed", "prev")),
+)
+_REDACT_KEYS = frozenset(("v", "redact", "purge_marker", "prev"))
+
+
+def entry_hash(entry):
+    """sha256 of an entry's canonical JSON: the next entry's prev, and the head."""
+    return hashlib.sha256(canonical(entry)).hexdigest()
+
+
+def chain_head_v2(chain):
+    return entry_hash(chain[-1]) if chain else GENESIS
+
+
+def is_v2(chain):
+    return bool(chain) and isinstance(chain[0], dict) and chain[0].get("v") == CHAIN_V2
+
+
+def unguessable(event):
+    """True when the line names its record by a uuid4 in hex (122 random bits): hashing a
+    guess of its content cannot confirm it, so its plain sha256 may be shown to anyone.
+    Every id atelya writes today has 48 bits (12 hex), so all its lines are keyed."""
+    rid = event.get("id") if isinstance(event, dict) else None
+    return isinstance(rid, str) and _UUID4_HEX.fullmatch(rid) is not None
+
+
+def _line_fields(raw, event, line_key):
+    if unguessable(event):
+        return {"line_sha256": hashlib.sha256(raw).hexdigest()}
+    if not line_key:
+        raise ValueError("a line without a uuid4 id needs the data directory's .erasure_key")
+    return {"line_hmac": hmac.new(line_key, raw, hashlib.sha256).hexdigest(), "keyed": True}
+
+
+def extend_chain_v2(chain, lines, line_key):
+    """The chain followed by one entry per (raw line bytes, event) of lines, in order;
+    seq continues after the last line entry."""
+    out, prev = list(chain), chain_head_v2(chain)
+    seq = sum(1 for e in chain if "seq" in e)
+    for raw, event in lines:
+        entry = {"v": CHAIN_V2, "seq": seq}
+        entry.update(_line_fields(raw, event, line_key))
+        entry["prev"] = prev
+        out.append(entry)
+        prev, seq = entry_hash(entry), seq + 1
+    return out
+
+
+def redaction_v2(chain, seqs, purge_marker):
+    """The redaction record a hard purge appends: these seqs' lines are gone, on purpose."""
+    return {
+        "v": CHAIN_V2,
+        "redact": sorted(set(seqs)),
+        "purge_marker": purge_marker,
+        "prev": chain_head_v2(chain),
+    }
+
+
+def verify_chain_v2(chain, lines, line_key):
+    """Check a v2 chain against the op-log's lines [(raw bytes, event)], in order.
+
+    Report: ok, verified (lines matched), redacted (seqs covered by redaction records),
+    unattested (lines after the last attested one), head, last_seq, seq_of_line (each
+    line's seq, None past the chain), error ({kind, seq, line, detail}; line is the index
+    into lines). Kinds: not_v2, bad_entry, broken_link, redaction_before_line,
+    key_missing, redacted_line_present, modified_line, reordered, inserted_line,
+    missing_line. A missing line is accepted only when a redaction record chained
+    after it covers its seq."""
+    report = {
+        "ok": False,
+        "verified": 0,
+        "redacted": 0,
+        "unattested": 0,
+        "head": chain_head_v2(chain),
+        "last_seq": None,
+        "seq_of_line": [None] * len(lines),
+        "error": None,
+    }
+
+    def fail(kind, seq=None, line=None, detail=""):
+        report["error"] = {"kind": kind, "seq": seq, "line": line, "detail": detail}
+        return report
+
+    entries, redacted, prev = [], set(), GENESIS
+    for i, e in enumerate(chain):
+        if not isinstance(e, dict) or e.get("v") != CHAIN_V2 or isinstance(e.get("v"), bool):
+            return fail("not_v2" if i == 0 else "bad_entry", detail=f"chain entry {i}")
+        if e.get("prev") != prev:
+            return fail("broken_link", seq=e.get("seq"), detail=f"chain entry {i}: prev mismatch")
+        keys = frozenset(e)
+        if keys in _LINE_KEYS:
+            seq, digest = e["seq"], e.get("line_sha256", e.get("line_hmac"))
+            if (
+                isinstance(seq, bool)
+                or seq != len(entries)
+                or not isinstance(digest, str)
+                or not _HEX64.fullmatch(digest)
+                or ("keyed" in e and e["keyed"] is not True)
+            ):
+                return fail("bad_entry", seq=seq, detail=f"chain entry {i}")
+            entries.append(e)
+        elif keys == _REDACT_KEYS:
+            red = e["redact"]
+            if (
+                not isinstance(red, list)
+                or not red
+                or any(isinstance(x, bool) or not isinstance(x, int) for x in red)
+            ):
+                return fail("bad_entry", detail=f"chain entry {i}: redact")
+            late = [x for x in red if not 0 <= x < len(entries)]
+            if late:
+                return fail("redaction_before_line", seq=late[0], detail=f"chain entry {i}")
+            redacted.update(red)
+        else:
+            return fail("bad_entry", seq=e.get("seq"), detail=f"chain entry {i}: fields")
+        prev = entry_hash(e)
+    if any("keyed" in e for e in entries) and not line_key:
+        return fail("key_missing", detail="keyed entries need the data directory's .erasure_key")
+    cache = {}
+
+    def match(e, k):
+        if k not in cache:
+            raw = lines[k][0]
+            mac = hmac.new(line_key, raw, hashlib.sha256).hexdigest() if line_key else None
+            cache[k] = (hashlib.sha256(raw).hexdigest(), mac)
+        sha, mac = cache[k]
+        return sha == e["line_sha256"] if "line_sha256" in e else mac == e["line_hmac"]
+
+    for s in sorted(redacted):
+        hit = next((k for k in range(len(lines)) if match(entries[s], k)), None)
+        if hit is not None:
+            return fail("redacted_line_present", seq=s, line=hit)
+    live = [e for e in entries if e["seq"] not in redacted]
+    i = 0
+    for j, e in enumerate(live):
+        if i < len(lines) and match(e, i):
+            report["seq_of_line"][i] = e["seq"]
+            i += 1
+            continue
+        if i >= len(lines):
+            return fail("missing_line", seq=e["seq"], detail="the op-log ends before this line")
+        later_entry = any(match(e2, i) for e2 in live[j + 1 :])
+        later_line = any(match(e, k) for k in range(i + 1, len(lines)))
+        if later_entry and later_line:
+            kind = "reordered"
+        elif later_entry:
+            kind = "missing_line"
+        elif later_line:
+            kind = "inserted_line"
+        else:
+            kind = "modified_line"
+        return fail(kind, seq=e["seq"], line=i)
+    report.update(
+        ok=True,
+        verified=i,
+        redacted=len(redacted),
+        unattested=len(lines) - i,
+        last_seq=entries[-1]["seq"] if entries else None,
+    )
+    return report
+
+
 def _load_key(args):
     if getattr(args, "key", None) is not None:
         print(
@@ -221,6 +399,8 @@ def main(argv=None):
         )
     elif args.cmd == "verify":
         chain = read_jsonl(args.path)
+        if is_v2(chain):
+            sys.exit(_V2_ELSEWHERE % args.path)
         ok, bad, reason = verify_chain(chain, key)
         print(f"  mode: {mode}")
         if ok:
@@ -229,8 +409,17 @@ def main(argv=None):
             print(f"❌ TAMPER DETECTED at seq={bad}: {reason}")
             return 1
     elif args.cmd == "root":
-        print(root_of(read_jsonl(args.path)))
+        chain = read_jsonl(args.path)
+        if is_v2(chain):
+            sys.exit(_V2_ELSEWHERE % args.path)
+        print(root_of(chain))
     return 0
+
+
+_V2_ELSEWHERE = (
+    "%s is an attest v2 chain (hashes only): verify it against its op-log with "
+    "`atelya-govern verify-chain <chain> --oplog <oplog.jsonl>`; its head is printed there."
+)
 
 
 def _selftest():
