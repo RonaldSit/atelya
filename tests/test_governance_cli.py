@@ -64,6 +64,8 @@ TOOLS = {
             "anchor-ots",
             "upgrade-ots",
             "verify-ots",
+            "list-quarantine",
+            "release",
         },
         "values": {
             "--id",
@@ -511,6 +513,10 @@ def _check_did_its_job(res, ctx):
         assert "changed" in json.loads(first), out
     elif tool == "govern" and cmd == "verify-ots":
         assert "PENDING" in out, out
+    elif tool == "govern" and cmd == "list-quarantine":
+        assert json.loads(first) == {"quarantined": []}, out
+    elif tool == "govern" and cmd == "release":
+        assert json.loads(first) == {"released": "r1"}, out
     if tool == "govern" and cmd == "erase":
         assert json.loads(first)["matched"] == 1, out
     elif tool == "govern" and cmd == "retention":
