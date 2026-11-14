@@ -535,3 +535,43 @@ def test_without_the_extra_the_commands_name_it(monkeypatch, tmp_path):
     _refuses_without_extra(
         _need("anchor_ots"), str(tmp_path / "c"), calendars=["http://127.0.0.1:9/"]
     )
+
+
+def test_a_malformed_digest_file_is_refused(tmp_path):
+    bad = str(tmp_path / "digest.txt")
+    with open(bad, "w") as f:
+        f.write("abcd\n# last_seq 2\n")
+    if not HAVE_OTS:
+        return _refuses_without_extra(
+            _need("anchor_ots"), None, digest_file=bad, calendars=["http://127.0.0.1:9/"]
+        )
+    with pytest.raises(_need("OtsError"), match="32-byte"):
+        _need("anchor_ots")(None, digest_file=bad, calendars=["http://127.0.0.1:9/"])
+
+
+def test_the_calendars_can_come_from_the_environment(tmp_path, calendar):
+    _p, ch = _chain(tmp_path)
+    url = calendar.url if calendar else "http://127.0.0.1:9/"
+    r = _cli("anchor-ots", ch, env={"ATELYA_OTS_CALENDARS": url})
+    if not HAVE_OTS:
+        assert r.returncode == 1 and "atelya-attest[ots]" in r.stderr, r.stderr
+        return
+    assert r.returncode == 0 and calendar.requests == [
+        ("POST", "/digest", bytes.fromhex(_head(ch)))
+    ], (
+        r.stdout + r.stderr,
+        calendar.requests,
+    )
+
+
+def test_verify_refuses_a_digest_file_of_another_head(tmp_path, calendar):
+    if not HAVE_OTS:
+        return _refuses_without_extra(
+            _need("verify_ots"), str(tmp_path / "x.ots"), str(tmp_path / "c")
+        )
+    _ch, proof = _anchored(tmp_path, calendar)
+    other = str(tmp_path / "other.txt")
+    with open(other, "w") as f:
+        f.write("11" * 32 + "\n# last_seq 2\n")
+    with pytest.raises(_need("OtsError"), match="does not commit"):
+        _need("verify_ots")(proof, None, digest_file=other)
