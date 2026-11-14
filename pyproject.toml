@@ -26,6 +26,15 @@ classifiers = [
   "Topic :: System :: Logging",
 ]
 
+[project.optional-dependencies]
+# OpenTimestamps anchoring (export-digest needs nothing; anchor-ots, upgrade-ots and verify-ots
+# need these). Python 3.11 or later: on 3.10 the extra installs nothing and the commands say so.
+# Pins and why: tests/ots-constraints.txt.
+ots = [
+  "opentimestamps==0.5.0; python_version >= '3.11'",
+  "opentimestamps-client==0.8.0; python_version >= '3.11'",
+]
+
 [project.urls]
 Homepage = "https://github.com/RonaldSit/atelya"
 Source = "https://github.com/RonaldSit/atelya"

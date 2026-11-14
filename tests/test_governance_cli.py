@@ -21,6 +21,7 @@ before the path failed there. parse_intermixed_args parses optionals first.
 This file is identical in atelya-internal and atelya-public.
 """
 
+import importlib.util
 import json
 import os
 import re
@@ -59,6 +60,10 @@ TOOLS = {
             "attest",
             "verify-chain",
             "repair",
+            "export-digest",
+            "anchor-ots",
+            "upgrade-ots",
+            "verify-ots",
         },
         "values": {
             "--id",
@@ -69,6 +74,11 @@ TOOLS = {
             "--key",
             "--keyfile",
             "--oplog",
+            "--digest-file",
+            "--calendar",
+            "--bitcoin-node",
+            "--btc-network",
+            "--timeout",
         },
         "flags": {
             "--hard",
@@ -77,9 +87,10 @@ TOOLS = {
             "--apply",
             "--drop-attest",
             "--v2",
+            "--allow-network",
             "--help",
         },
-        "no_path": set(),
+        "no_path": {"anchor-ots"},
     },
     "attest": {
         "script": "amem_attest.py",
@@ -319,10 +330,29 @@ def _write_oplog(path):
 
 def _env():
     env = dict(os.environ)
-    for name in ("AMEM_ATTEST_KEY", "AMEM_ANCHOR_KEY"):
+    for name in ("AMEM_ATTEST_KEY", "AMEM_ANCHOR_KEY", "AMEM_PRIVATE"):
         env.pop(name, None)
     env["PYTHONUTF8"] = "1"
+    if _OTS.get("calendar") is not None:  # never the public calendars
+        env["ATELYA_OTS_CALENDARS"] = _OTS["calendar"].url
     return env
+
+
+OTS_CMDS = ("export-digest", "anchor-ots", "upgrade-ots", "verify-ots")
+_OTS = {}
+
+
+def _ots_fakes():
+    """tests/test_ots.py's fake calendar (and whether the [ots] extra is installed)."""
+    if not _OTS:
+        spec = importlib.util.spec_from_file_location(
+            "ots_fakes", Path(__file__).with_name("test_ots.py")
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _OTS["have"] = mod.HAVE_OTS
+        _OTS["calendar"] = mod.FakeCalendar() if mod.HAVE_OTS else None
+    return _OTS
 
 
 def _run(tool, argv, cwd):
@@ -372,9 +402,53 @@ def _fill(shape, path, values):
     return argv
 
 
+def _concrete_ots(cmd, shape, d, ctx):
+    """export-digest, anchor-ots, upgrade-ots, verify-ots on a fresh v2 chain."""
+    fakes = _ots_fakes()
+    ctx["ots"] = fakes["have"]
+    oplog = os.path.join(d, "log.jsonl")
+    _ok(_run("govern", ["attest", oplog, "--v2"], d))
+    chain = oplog + ".attest.jsonl"
+    digest = os.path.join(d, "digest.txt")
+    _ok(_run("govern", ["export-digest", chain, "--out", digest], d))
+    proof = chain + ".ots"
+    if fakes["have"] and cmd in ("upgrade-ots", "verify-ots"):
+        _ok(_run("govern", ["anchor-ots", chain], d))
+    values = {
+        "--out": os.path.join(
+            d, "out" + next((x[1] for x in shape if isinstance(x, tuple) and x[0] == "--out"), "")
+        ),
+        "--digest-file": digest,
+        "--calendar": fakes["calendar"].url if fakes["have"] else "http://127.0.0.1:9/",
+        "--bitcoin-node": "http://user:pass@127.0.0.1:9",
+    }
+    paths = {
+        "export-digest": [chain],
+        "anchor-ots": [chain],
+        "upgrade-ots": [proof],
+        "verify-ots": [proof, chain],
+    }[cmd]
+    argv = []
+    for item in shape:
+        if item == "P":
+            argv.append(paths.pop(0))
+        elif isinstance(item, tuple):
+            argv += [item[0], values[item[0]]]
+        else:
+            argv.append(item)
+    ctx.update(chain=chain, proof=proof, out=values["--out"] if "--out" in _opts(shape) else None)
+    return argv, ctx
+
+
 def _concrete(tool, shape, d):
     """argv for a shape, on fresh files in d, and what the run must show."""
     cmd = shape[0] if shape[0] in TOOLS[tool]["cmds"] else None
+    if tool == "govern" and cmd in OTS_CMDS:
+        oplog = os.path.join(d, "log.jsonl")
+        _write_oplog(oplog)
+        return _concrete_ots(
+            cmd, shape, d, {"tool": tool, "cmd": cmd, "oplog": oplog, "apply": False}
+        )
     oplog = os.path.join(d, "log.jsonl")
     (_bad_oplog if (tool, cmd) == ("govern", "repair") else _write_oplog)(oplog)
     keyfile, opts = _keyfile(d), _opts(shape)
@@ -429,6 +503,14 @@ def _check_did_its_job(res, ctx):
     first = out.splitlines()[0] if out.strip() else ""
     if cmd is None:  # --selftest, --help
         return
+    if tool == "govern" and cmd == "export-digest":
+        assert "head " in out and os.path.getsize(ctx["out"] or ctx["chain"] + ".digest") > 0, out
+    elif tool == "govern" and cmd == "anchor-ots":
+        assert "anchored head" in out and "not covered until the next anchor" in out, out
+    elif tool == "govern" and cmd == "upgrade-ots":
+        assert "changed" in json.loads(first), out
+    elif tool == "govern" and cmd == "verify-ots":
+        assert "PENDING" in out, out
     if tool == "govern" and cmd == "erase":
         assert json.loads(first)["matched"] == 1, out
     elif tool == "govern" and cmd == "retention":
@@ -461,7 +543,13 @@ def _run_form(tool, shape, tmp_path):
         f"argv {argv}\nrc {res.returncode}\nstdout {res.stdout[-600:]}\nstderr {res.stderr[-600:]}"
     )
     assert "unrecognized arguments" not in res.stderr, msg
-    assert res.returncode == 0, msg
+    if ctx.get("ots") is False and ctx["cmd"] != "export-digest":  # Python 3.10: no [ots] extra
+        assert res.returncode == 1 and "atelya-attest[ots]" in res.stderr, msg
+        return
+    if ctx.get("cmd") == "verify-ots":  # pending: no Bitcoin attestation from the fake calendar yet
+        assert res.returncode == 3, msg
+    else:
+        assert res.returncode == 0, msg
     _check_did_its_job(res, ctx)
 
 

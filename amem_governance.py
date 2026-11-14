@@ -43,6 +43,12 @@ CLI:
   python amem_governance.py attest    <oplog.jsonl> --v2 [--out chain.jsonl]
   python amem_governance.py verify-chain <chain.jsonl> [--key K|--keyfile F]
   python amem_governance.py verify-chain <chain.jsonl> [--oplog <oplog.jsonl>]
+  python amem_governance.py export-digest <chain.jsonl> [--out digest.txt]
+  python amem_governance.py anchor-ots <chain.jsonl> [--calendar URL] [--allow-network]
+  python amem_governance.py anchor-ots --digest-file <digest.txt> [--calendar URL] [--allow-network]
+  python amem_governance.py upgrade-ots <proof.ots> [--calendar URL] [--allow-network]
+  python amem_governance.py verify-ots <proof.ots> <chain.jsonl> [--bitcoin-node URL]
+  python amem_governance.py verify-ots <proof.ots> --digest-file <digest.txt> [--bitcoin-node URL]
   python amem_governance.py repair --quarantine-bad-lines <oplog.jsonl> [--apply]
   python amem_governance.py --selftest
 
@@ -67,6 +73,18 @@ line from the op-log (--oplog, or the chain path without .attest.jsonl) and name
 problem: a modified, reordered, inserted or missing line, a redaction naming a line that
 still exists, a broken link or a missing key. Lines after the chain are reported as not yet
 attested.
+
+OpenTimestamps (atelya docs/ots.md; needs atelya-attest[ots], Python 3.11 or later): explicit
+commands only, nothing runs on its own. export-digest writes the v2 chain head (32 bytes, hex)
+and its last seq, so anchoring can happen on another machine. anchor-ots sends only that
+32-byte digest to OpenTimestamps calendars (default: the client's aggregators, or
+ATELYA_OTS_CALENDARS, or --calendar) and writes <chain>.ots plus <chain>.ots.note.json; it
+prints the last seq it covers: lines attested after it are not covered until the next anchor.
+upgrade-ots asks the calendars named in the proof (only whitelisted ones) for the Bitcoin
+attestation. verify-ots checks the proof against the chain (the head of the chain as it was
+at that seq) or a digest file, then against your own bitcoind over RPC (--bitcoin-node, or
+its bitcoin.conf); exit 0 verified, 3 pending (no Bitcoin attestation yet), 1 failed. With
+AMEM_PRIVATE=1, anchor-ots and upgrade-ots refuse unless --allow-network is given.
 Post-purge hooks: after every HARD erase/retention, each installed entry point
 in the group "atelya.purge_hooks" is called with the op-log path, the purged
 record ids with SHA-256 digests of their texts, and (erase only) the matcher.
@@ -796,6 +814,293 @@ def _hmac_hex(oplog_path, value):
     return hmac.new(key, value.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
+# ---- OpenTimestamps anchoring of the v2 head (atelya web3-features-spec W5) --------------
+OTS_EXTRA = (
+    "the OpenTimestamps commands need the extra atelya-attest[ots] (Python 3.11 or later): "
+    "pip install 'atelya-attest[ots]'"
+)
+OTS_CALENDARS_ENV = "ATELYA_OTS_CALENDARS"
+_TRUTHY = ("1", "true", "yes", "on")
+
+
+class OtsUnavailable(RuntimeError):
+    """The [ots] extra (opentimestamps, opentimestamps-client) is not installed."""
+
+
+class OtsError(ValueError):
+    """An OpenTimestamps command could not do its job; the message says why."""
+
+
+def _ots():
+    """The OpenTimestamps classes, or OtsUnavailable naming the extra."""
+    try:
+        import opentimestamps.calendar as calendar
+        from opentimestamps.core.notary import BitcoinBlockHeaderAttestation, PendingAttestation
+        from opentimestamps.core.op import OpSHA256
+        from opentimestamps.core.serialize import (
+            StreamDeserializationContext,
+            StreamSerializationContext,
+        )
+        from opentimestamps.core.timestamp import DetachedTimestampFile, Timestamp
+    except ImportError as e:
+        raise OtsUnavailable(OTS_EXTRA) from e
+    return argparse.Namespace(
+        calendar=calendar,
+        Bitcoin=BitcoinBlockHeaderAttestation,
+        Pending=PendingAttestation,
+        OpSHA256=OpSHA256,
+        In=StreamDeserializationContext,
+        Out=StreamSerializationContext,
+        Detached=DetachedTimestampFile,
+        Timestamp=Timestamp,
+    )
+
+
+def _private_network_refusal(cmd, allow_network):
+    if allow_network:
+        return
+    if (os.environ.get("AMEM_PRIVATE", "") or "").strip().lower() in _TRUTHY:
+        raise OtsError(
+            f"{cmd} sends a digest to OpenTimestamps calendars over the network, and private mode "
+            "(AMEM_PRIVATE) refuses that. Anchor from another machine instead: run "
+            "`atelya-govern export-digest <chain>` here, copy the digest file, and run "
+            "`atelya-govern anchor-ots --digest-file <file>` there. Or pass --allow-network."
+        )
+
+
+def _v2_head(chain_path):
+    """(head bytes, last seq, the chain) of an attest v2 chain file."""
+    att = _attest_module()
+    chain = _read_chain(chain_path)
+    if not att.is_v2(chain):
+        raise ChainMismatch(
+            f"{chain_path} is not an attest v2 chain: OpenTimestamps anchors the head of a v2 chain "
+            "(attest --v2)"
+        )
+    last = next((e["seq"] for e in reversed(chain) if "seq" in e), None)
+    return bytes.fromhex(att.chain_head_v2(chain)), last, chain
+
+
+def export_digest(chain_path, out=None):
+    """Write the v2 chain head as hex, then `# last_seq N`, to out (default
+    <chain>.digest). Needs no network and no extra."""
+    head, last, _chain = _v2_head(chain_path)
+    out = out or chain_path + ".digest"
+    with open(out, "w", encoding="utf-8") as f:
+        f.write(f"{head.hex()}\n# last_seq {last}\n")
+    return {"digest_file": out, "head": head.hex(), "last_seq": last}
+
+
+def _read_digest_file(path):
+    with open(path, encoding="utf-8") as f:
+        lines = [ln.strip() for ln in f.read().splitlines() if ln.strip()]
+    try:
+        digest = bytes.fromhex(lines[0])
+    except (IndexError, ValueError):
+        digest = b""
+    if len(digest) != 32:
+        raise OtsError(
+            f"{path}: the first line must be a 32-byte digest in hex (export-digest writes it)"
+        )
+    last = None
+    for ln in lines[1:]:
+        if ln.startswith("# last_seq "):
+            tail = ln[len("# last_seq ") :]
+            last = int(tail) if tail.isdigit() else None
+    return digest, last
+
+
+def _calendars(calendars, o):
+    if calendars:
+        return list(calendars)
+    env = (os.environ.get(OTS_CALENDARS_ENV) or "").split()
+    return env or list(o.calendar.DEFAULT_AGGREGATORS)
+
+
+def _scope(last):
+    if last is None:
+        return "the last seq this digest covers is not known (the digest file does not say)"
+    return (
+        f"covers the attest v2 chain up to seq {last}; lines attested after seq {last} are not "
+        "covered until the next anchor"
+    )
+
+
+def anchor_ots(
+    chain_path=None, digest_file=None, out=None, calendars=None, timeout=10, allow_network=False
+):
+    """Send only the 32-byte chain head to OpenTimestamps calendars and write the proof
+    (<chain or digest file>.ots) and its note (<proof>.note.json)."""
+    _private_network_refusal("anchor-ots", allow_network)
+    o = _ots()
+    if digest_file:
+        digest, last = _read_digest_file(digest_file)
+        base = digest_file
+    else:
+        digest, last, _chain = _v2_head(chain_path)
+        base = chain_path
+    ts = o.Timestamp(digest)
+    accepted, errors = [], []
+    for url in _calendars(calendars, o):
+        try:
+            ts.merge(
+                o.calendar.RemoteCalendar(url, user_agent="atelya-govern").submit(
+                    digest, timeout=timeout
+                )
+            )
+            accepted.append(url)
+        except Exception as e:  # each calendar on its own; the result says which failed
+            errors.append(f"{url}: {type(e).__name__}: {e}"[:300])
+    if not accepted:
+        raise OtsError("no calendar accepted the digest: " + "; ".join(errors))
+    proof = out or base + ".ots"
+    tmp = proof + ".tmp"
+    with open(tmp, "wb") as f:
+        o.Detached(o.OpSHA256(), ts).serialize(o.Out(f))
+    os.replace(tmp, proof)
+    note = {
+        "proof": os.path.basename(proof),
+        "head": digest.hex(),
+        "last_seq": last,
+        "anchored_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "calendars": accepted,
+        "scope": _scope(last),
+    }
+    with open(proof + ".note.json", "w", encoding="utf-8") as f:
+        json.dump(note, f, indent=1)
+        f.write("\n")
+    return {
+        "proof": proof,
+        "head": digest.hex(),
+        "last_seq": last,
+        "calendars": accepted,
+        "errors": errors,
+        "scope": note["scope"],
+    }
+
+
+def _load_proof(o, proof):
+    with open(proof, "rb") as f:
+        try:
+            return o.Detached.deserialize(o.In(f))
+        except Exception as e:
+            raise OtsError(
+                f"{proof}: not a readable OpenTimestamps proof ({type(e).__name__}: {e})"
+            ) from e
+
+
+def _bitcoin_heights(o, dtf):
+    return sorted(
+        {a.height for _m, a in dtf.timestamp.all_attestations() if isinstance(a, o.Bitcoin)}
+    )
+
+
+def upgrade_ots(proof, calendars=None, timeout=10, allow_network=False):
+    """Ask the calendars named in the proof for its Bitcoin attestation. Only calendars on
+    the client's whitelist, or given with --calendar / ATELYA_OTS_CALENDARS, are asked."""
+    _private_network_refusal("upgrade-ots", allow_network)
+    o = _ots()
+    dtf = _load_proof(o, proof)
+    allowed = (
+        set(_calendars(calendars, o)) if calendars or os.environ.get(OTS_CALENDARS_ENV) else set()
+    )
+    before = _bitcoin_heights(o, dtf)
+    asked, skipped, pending = [], [], []
+
+    def walk(stamp):
+        yield stamp
+        for sub in stamp.ops.values():
+            yield from walk(sub)
+
+    for stamp in list(walk(dtf.timestamp)):
+        for att in list(stamp.attestations):
+            if not isinstance(att, o.Pending):
+                continue
+            if att.uri not in allowed and att.uri not in o.calendar.DEFAULT_CALENDAR_WHITELIST:
+                skipped.append(att.uri)
+                continue
+            asked.append(att.uri)
+            try:
+                upgraded = o.calendar.RemoteCalendar(
+                    att.uri, user_agent="atelya-govern"
+                ).get_timestamp(stamp.msg, timeout=timeout)
+            except o.calendar.CommitmentNotFoundError:
+                pending.append(att.uri)
+                continue
+            except Exception as e:
+                pending.append(f"{att.uri} ({type(e).__name__})")
+                continue
+            stamp.merge(upgraded)
+    after = _bitcoin_heights(o, dtf)
+    changed = after != before
+    if changed:
+        tmp = proof + ".tmp"
+        with open(tmp, "wb") as f:
+            dtf.serialize(o.Out(f))
+        os.replace(tmp, proof)
+    return {
+        "proof": proof,
+        "changed": changed,
+        "bitcoin_heights": after,
+        "asked": asked,
+        "skipped": skipped,
+        "pending": pending,
+    }
+
+
+def verify_ots(proof, chain_path=None, digest_file=None, bitcoin_node=None, btc_network="mainnet"):
+    """Check a proof against the chain (or a digest file), then its Bitcoin attestations
+    against your own bitcoind. status: verified, pending (no Bitcoin attestation yet) or
+    failed (OtsError)."""
+    o = _ots()
+    dtf = _load_proof(o, proof)
+    digest = dtf.file_digest
+    covered = chain_last = None
+    if digest_file:
+        want, covered = _read_digest_file(digest_file)
+        if want != digest:
+            raise OtsError(f"{proof} does not commit to the digest in {digest_file}")
+    else:
+        att = _attest_module()
+        chain = _read_chain(chain_path)
+        if not att.is_v2(chain):
+            raise ChainMismatch(f"{chain_path} is not an attest v2 chain")
+        k = next((i for i, e in enumerate(chain) if att.entry_hash(e) == digest.hex()), None)
+        if k is None:
+            raise OtsError(
+                f"{proof} does not commit to {chain_path} (no entry of it hashes to the proof's digest)"
+            )
+        covered = next((e["seq"] for e in reversed(chain[: k + 1]) if "seq" in e), None)
+        chain_last = next((e["seq"] for e in reversed(chain) if "seq" in e), None)
+    result = {
+        "proof": proof,
+        "digest": digest.hex(),
+        "covered_last_seq": covered,
+        "chain_last_seq": chain_last,
+    }
+    attestations = sorted(
+        ((m, a) for m, a in dtf.timestamp.all_attestations() if isinstance(a, o.Bitcoin)),
+        key=lambda x: x[1].height,
+    )
+    if not attestations:
+        return dict(result, status="pending")
+    import bitcoin
+    import bitcoin.rpc
+
+    bitcoin.SelectParams(btc_network)
+    proxy = bitcoin.rpc.Proxy(service_url=bitcoin_node) if bitcoin_node else bitcoin.rpc.Proxy()
+    problems = []
+    for msg, a in attestations:
+        try:
+            header = proxy.getblockheader(proxy.getblockhash(a.height))
+            when = a.verify_against_blockheader(msg, header)
+        except Exception as e:  # each attestation on its own; one good one is enough
+            problems.append(f"block {a.height}: {type(e).__name__}: {e}"[:300])
+            continue
+        return dict(result, status="verified", height=a.height, block_time=when)
+    raise OtsError("no Bitcoin attestation verified: " + "; ".join(problems))
+
+
 def _attest_guard(path, drop_attest):
     """Refuse a hard purge while the default v1 attest chain exists: it stores every
     event verbatim, so the purged text would stay in it. drop_attest deletes it.
@@ -1355,9 +1660,14 @@ def main(argv=None):
             "attest",
             "verify-chain",
             "repair",
+            "export-digest",
+            "anchor-ots",
+            "upgrade-ots",
+            "verify-ots",
         ],
     )
     parser.add_argument("oplog", nargs="?")
+    parser.add_argument("target", nargs="?")
     parser.add_argument("--id")
     parser.add_argument("--match")
     parser.add_argument("--out")
@@ -1372,6 +1682,14 @@ def main(argv=None):
     parser.add_argument("--drop-attest", action="store_true")
     parser.add_argument("--v2", action="store_true")
     parser.add_argument("--oplog", dest="chain_oplog")
+    parser.add_argument("--digest-file")
+    parser.add_argument("--calendar", action="append")
+    parser.add_argument("--allow-network", action="store_true")
+    parser.add_argument("--bitcoin-node")
+    parser.add_argument(
+        "--btc-network", choices=["mainnet", "testnet", "regtest"], default="mainnet"
+    )
+    parser.add_argument("--timeout", type=float, default=10.0)
     # parse_intermixed_args, not parse_args: on Python 3.10, 3.11, 3.12.0-3.12.6 and
     # 3.13.0, parse_args gives the optional "oplog" positional zero strings when an
     # option follows the subcommand, then rejects the path as unrecognized, so
@@ -1382,6 +1700,10 @@ def main(argv=None):
 
     if args.selftest:
         return _selftest()
+    if args.target is not None and args.cmd != "verify-ots":
+        parser.error(f"unexpected argument {args.target!r} (only verify-ots takes a second path)")
+    if args.cmd in ("export-digest", "anchor-ots", "upgrade-ots", "verify-ots"):
+        return _ots_main(args)
     if not args.cmd or not args.oplog:
         sys.exit(
             "usage: amem_governance.py {audit|lineage|conflicts|erase|retention|summary|repair} <oplog.jsonl> [...]"
@@ -1538,6 +1860,81 @@ def main(argv=None):
         print(json.dumps(record, ensure_ascii=False, default=str))
         return _print_hooks(record, args.hard)
     return 0
+
+
+def _ots_main(args):
+    """export-digest, anchor-ots, upgrade-ots, verify-ots. Exit 0 ok, 1 refused or failed,
+    3 (verify-ots) pending."""
+    try:
+        if args.cmd == "export-digest":
+            if not args.oplog:
+                sys.exit("usage: export-digest <chain.jsonl> [--out digest.txt]")
+            r = export_digest(args.oplog, out=args.out)
+            print(f"head {r['head']} (last seq {r['last_seq']}) -> {r['digest_file']}")
+            print("anchor it on a machine with network access: anchor-ots --digest-file <file>")
+            return 0
+        if args.cmd == "anchor-ots":
+            if not args.oplog and not args.digest_file:
+                sys.exit(
+                    "usage: anchor-ots (<chain.jsonl> | --digest-file F) [--calendar URL] [--allow-network]"
+                )
+            r = anchor_ots(
+                args.oplog,
+                digest_file=args.digest_file,
+                out=args.out,
+                calendars=args.calendar,
+                timeout=args.timeout,
+                allow_network=args.allow_network,
+            )
+            print(f"anchored head {r['head']} -> {r['proof']} ({len(r['calendars'])} calendar(s))")
+            for err in r["errors"]:
+                print(f"  calendar failed: {err}")
+            if r["last_seq"] is None:
+                print(f"  scope: {r['scope']}")
+            else:
+                print(
+                    f"  scope: covers the chain up to last seq {r['last_seq']}; lines attested after it are "
+                    "not covered until the next anchor"
+                )
+            print("  pending until a Bitcoin block includes it: run upgrade-ots later")
+            return 0
+        if args.cmd == "upgrade-ots":
+            if not args.oplog:
+                sys.exit("usage: upgrade-ots <proof.ots> [--calendar URL] [--allow-network]")
+            r = upgrade_ots(
+                args.oplog,
+                calendars=args.calendar,
+                timeout=args.timeout,
+                allow_network=args.allow_network,
+            )
+            print(json.dumps(r))
+            print(
+                f"  Bitcoin attestation(s) at block {', '.join(map(str, r['bitcoin_heights']))}"
+                if r["bitcoin_heights"]
+                else "  still pending: no Bitcoin attestation yet"
+            )
+            return 0
+        if not args.oplog or not (args.target or args.digest_file):
+            sys.exit(
+                "usage: verify-ots <proof.ots> (<chain.jsonl> | --digest-file F) [--bitcoin-node URL]"
+            )
+        r = verify_ots(
+            args.oplog,
+            args.target,
+            digest_file=args.digest_file,
+            bitcoin_node=args.bitcoin_node,
+            btc_network=args.btc_network,
+        )
+        print(json.dumps(r))
+        if r["status"] == "pending":
+            print("  PENDING: no Bitcoin attestation yet (run upgrade-ots later)")
+            return 3
+        print(
+            f"  VERIFIED: Bitcoin block {r['height']} attests the chain up to seq {r['covered_last_seq']}"
+        )
+        return 0
+    except (OtsUnavailable, OtsError, ChainMismatch, OplogError, OSError) as e:
+        sys.exit(str(e))
 
 
 def _selftest():
