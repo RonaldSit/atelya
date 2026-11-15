@@ -1,0 +1,19 @@
+{
+ "about": "Expected passed and skipped checks per CI job and suite (harness plan H1). tools/test_counts.py compares every job's counts with this file; change a count here in the same commit as the tests.",
+ "jobs": {
+  "test": {
+   "variants": [
+    "3.10",
+    "3.11",
+    "3.12.3",
+    "3.12",
+    "3.13"
+   ],
+   "suites": {
+    "pytest-tests": {
+     "passed": 432
+    }
+   }
+  }
+ }
+}

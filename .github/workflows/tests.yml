@@ -2,7 +2,7 @@ name: tests
 
 on:
   push:
-    branches: [main]
+    branches: [main, "feat/**", "scratch/**"]
   pull_request:
 
 jobs:
@@ -35,7 +35,17 @@ jobs:
         if: matrix.python-version != '3.10'
         run: echo "ATELYA_REQUIRE_OTS=1" >> "$GITHUB_ENV"
       - name: Run test suite
-        run: python -m pytest tests/ -q
+        run: python tools/test_counts.py run pytest-tests -- python -m pytest tests/ -q
+      - name: The suite ran, with the count in tests/expected_counts.json
+        if: ${{ !cancelled() }}
+        run: python tools/test_counts.py check --job test --variant ${{ matrix.python-version }}
+      - name: Upload the counts for ci-summary
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: counts-${{ github.job }}-${{ matrix.python-version || 'default' }}
+          path: test-results/
+          if-no-files-found: warn
 
   lint:
     runs-on: ubuntu-latest
@@ -66,3 +76,24 @@ jobs:
             timeout 10 "$b" --help </dev/null >/dev/null
           done
 
+  ci-summary:
+    # Every test job uploads its counts. This job fails when one uploaded none, when a count
+    # differs from tests/expected_counts.json, or when any job did not succeed.
+    if: ${{ always() }}
+    needs: [test, lint, cli-contract]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Download every job's counts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: counts-*
+          path: all-counts
+      - name: Every job uploaded its counts, every count matches, every job succeeded
+        if: ${{ !cancelled() }}
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: python tools/test_counts.py summary --root all-counts --needs-env NEEDS
