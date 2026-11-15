@@ -7,6 +7,10 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`amem_governance.EVENT_FIELDS`**: the op-log event types and the fields each may
+  carry (record events `add` and `update` carry text; every other event only ids,
+  reason codes and HMACs). Identical to atelya's `amem/events.py`, whose lint compares
+  the two and checks that every event type the code writes is listed.
 - **Test-count manifest in CI** (`tests/expected_counts.json`, `tools/test_counts.py`):
   the test job runs the suite through `tools/test_counts.py run`, which records the
   passed and skipped counts, and checks them against the manifest; a `ci-summary` job

@@ -172,6 +172,21 @@ class OplogError(ValueError):
 # ---- schema version and times (same rules as amem/oplog.py; atelya checks both) ----
 SCHEMA_VERSION = 2  # what new events carry; the highest version this code reads
 
+# The op-log event types and the fields each may carry. Identical to EVENT_FIELDS in atelya's
+# amem/events.py (its tools/lint_rules.py, rule L4, compares the two). Record events (add,
+# update) carry the record's text; every other event only ids, reason codes and HMACs.
+EVENT_FIELDS = {
+    "add": {"record": True, "fields": ["op", "id", "text", "key", "created_at", "src", "ts", "v"]},
+    "update": {"record": True, "fields": ["op", "id", "text", "src", "ts", "v"]},
+    "forget": {"record": False, "fields": ["op", "id", "reason", "ts", "v"]},
+    "supersede": {"record": False, "fields": ["op", "id", "reason", "ts", "v"]},
+    "key_conflict": {"record": False, "fields": ["op", "id", "holder", "key", "reason", "ts", "v"]},
+    "flag": {"record": False, "fields": ["op", "a", "b", "why", "ts", "v"]},
+    "purge": {"record": False, "fields": ["op", "id", "reason", "note", "ts", "v"]},
+    "quarantine": {"record": False, "fields": ["op", "id", "reason", "ts", "v"]},
+    "release": {"record": False, "fields": ["op", "id", "reason", "ts", "v"]},
+}
+
 
 class SchemaVersionError(OplogError):
     """A line this code cannot read: written by a newer version ("newer_schema"),
