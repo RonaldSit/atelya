@@ -71,6 +71,7 @@ def test_parse_counts_every_summary_format():
         "=== 58 passed, 0 failed, 2 skipped ===": (58, 0, 2),
         "[e2e] 10 passed, 0 failed": (10, 0, 0),
         "P0-5 ... INTEGRATION 23/23 PASS": (23, 0, 0),
+        "INTEGRATION 3/5 PASS": (3, 2, 0),
         "\n41 tests passed.": (41, 0, 0),
         "....\n407 passed in 23.76s": (407, 0, 0),
         "1 failed, 406 passed, 2 skipped in 1.02s": (406, 1, 2),
@@ -347,6 +348,15 @@ def test_workflow_reports_a_missing_check_upload_or_need(tmp_path):
     assert "single: no `test_counts.py check --job single`" in r.stdout, r.stdout
     assert "suites: no upload of counts-" in r.stdout, r.stdout
     assert "ci-summary does not need job lint" in r.stdout, r.stdout
+
+
+def test_workflow_reports_a_manifest_job_the_workflow_lacks(tmp_path):
+    need("cmd_workflow")
+    wf = WORKFLOW.replace("  single:\n", "  renamed:\n").replace(
+        "needs: [suites, single, lint]", "needs: [suites, renamed, lint]"
+    )
+    r = _workflow(tmp_path, wf)
+    assert r.returncode == 1 and "manifest job single is not a job of" in r.stdout, r.stdout
 
 
 def test_workflow_reports_claude_md_out_of_step(tmp_path):
