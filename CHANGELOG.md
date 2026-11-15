@@ -7,6 +7,12 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Test-count manifest in CI** (`tests/expected_counts.json`, `tools/test_counts.py`):
+  the test job runs the suite through `tools/test_counts.py run`, which records the
+  passed and skipped counts, and checks them against the manifest; a `ci-summary` job
+  needs every job and fails if a job uploaded no counts, a count changed without a
+  manifest change, or any job did not succeed. `tools/test_counts.py` is byte-identical
+  to atelya-internal's. CI now also runs on `feat/**` and `scratch/**` pushes.
 - **Quarantine commands** for atelya's payment-content quarantine (atelya
   records below user trust whose text holds a wallet address are hidden from
   recall and logged as `{"op": "quarantine", "id", "reason":
