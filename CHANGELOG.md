@@ -6,6 +6,10 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **README wording**: "guarantee" is no longer used; the section is now "What it does — and
+  does not" (the claims rules of atelya's harness plan H3). No behaviour change.
+
 ### Added
 - **`amem_governance.EVENT_FIELDS`**: the op-log event types and the fields each may
   carry (record events `add` and `update` carry text; every other event only ids,

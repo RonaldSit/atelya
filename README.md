@@ -43,13 +43,13 @@ atelya-govern verify-chain chain.jsonl
 
 ## What you get
 
-| Capability | Command | The guarantee |
+| Capability | Command | What it does |
 |---|---|---|
 | Seal a memory log | `atelya-govern attest` | every event hash-chained; one ROOT commits the whole history |
 | Verify integrity | `atelya-govern verify-chain` | a single flipped byte fails **at the exact record**, exit 1 |
 | Keyed chains | `--key / --keyfile / $ENV` (HMAC-SHA-256) | wrong key fails; **empty/whitespace keys are refused** — no silent HMAC→SHA-256 downgrade |
 | External anchoring | `atelya-anchor anchor / check / latest` | rewrite-and-rechain attacks surface as **ANCHOR CONFLICT**; a forgotten `--label` **fails loudly and lists what exists** instead of silently passing |
-| GDPR erasure | `atelya-govern erase [--hard]` | soft = auditable forget (text retained); hard = the record and every event naming it removed from the op-log and its side files, marker records only an **HMAC-SHA-256** of the pattern (key in `<data_dir>/.erasure_key`) — the erasure is recorded, and without the key the pattern cannot be confirmed by hashing guesses; refuses while the default attest chain exists (see *Guarantees*) |
+| GDPR erasure | `atelya-govern erase [--hard]` | soft = auditable forget (text retained); hard = the record and every event naming it removed from the op-log and its side files, marker records only an **HMAC-SHA-256** of the pattern (key in `<data_dir>/.erasure_key`) — the erasure is recorded, and without the key the pattern cannot be confirmed by hashing guesses; refuses while the default attest chain exists (see *What it does — and does not*) |
 | Audit views | `audit / lineage / conflicts / summary` | full timeline, one record's life, flagged contradictions |
 | Retention | `retention --max-age / --max-active` | age/cap-based retirement, logged like everything else |
 | Post-purge hooks | entry-point group `atelya.purge_hooks` | after every hard erase/retention, each installed hook gets the purged ids, **SHA-256 digests** of their texts and (erase only) the matcher — never the text — so a product can remove its own copies; the CLI prints every hook's outcome (or that none is installed) and exits 1 if one failed |
@@ -116,10 +116,10 @@ atelya-anchor check chain.jsonl --ledger ~/anchors/anchors.jsonl --label prod
 Run the ledger under **separate control** (different account/host/WORM store);
 separation of duties is what turns "detects accidents" into "detects insiders".
 
-## Guarantees — and non-guarantees
+## What it does — and does not
 
 - **Tamper-EVIDENT, not tamper-proof.** Anyone claiming tamper-proof is
-  overselling. Detection is the guarantee; prevention needs your storage
+  overselling. Detection is what it provides; prevention needs your storage
   controls, and rewrite-resistance needs the external anchor (shipped).
 - A forgotten `--label` on `check` is treated as an operator error, not a
   pass: the tool fails and lists the labels the ledger actually holds.
@@ -183,7 +183,7 @@ evidence trail those audits ask for; sources and control mapping
 ## FAQ
 
 **Is this "tamper-proof"?** No — tamper-evident, plus external anchoring
-against rewrite-and-rechain. See *Guarantees* above.
+against rewrite-and-rechain. See *What it does — and does not* above.
 
 **We already have a memory stack.** Keep it. If it can emit
 JSONL events, the attest layer bolts on today — three commands, zero
