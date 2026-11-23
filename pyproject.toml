@@ -41,9 +41,9 @@ Source = "https://github.com/RonaldSit/atelya"
 Issues = "https://github.com/RonaldSit/atelya/issues"
 
 [project.scripts]
-atelya-attest = "amem_attest:main"
-atelya-anchor = "amem_anchor:main"
-atelya-govern = "amem_governance:main"
+atelya-attest = "amem_attest:cli"
+atelya-anchor = "amem_anchor:cli"
+atelya-govern = "amem_governance:cli"
 
 [tool.setuptools]
 py-modules = ["amem_attest", "amem_anchor", "amem_governance"]

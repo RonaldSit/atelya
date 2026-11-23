@@ -20,6 +20,13 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
   and `PENDING`.
 
 ### Changed
+- **SIGPIPE is set by the command-line entry point, not by `main()`**: `amem_governance.main()`,
+  `amem_attest.main()` and `amem_anchor.main()` no longer change the SIGPIPE disposition of the
+  process that calls them. The console scripts (`atelya-govern`, `atelya-attest`,
+  `atelya-anchor`) and `python <file>.py` enter through the new `cli()`, which sets it, so a
+  command piped to `head` or `less` still ends quietly. Before, a longer-lived process that
+  had called `main()` (a test runner, a server) kept the default disposition, and a later
+  write to a closed pipe ended it without output. `tests/test_sigpipe_entry.py`.
 - **`replay()`** runs through `_replay_iter()`, which `provenance` shares, so the same-key
   supersede rule exists once. No behaviour change.
 - **README wording**: "guarantee" is no longer used; the section is now "What it does — and
