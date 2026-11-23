@@ -53,6 +53,7 @@ TOOLS = {
         "cmds": {
             "audit",
             "lineage",
+            "provenance",
             "conflicts",
             "erase",
             "retention",
@@ -311,6 +312,7 @@ INTERLEAVED = [
     ("govern", ("attest", ("--out", ".jsonl"), "P")),
     ("govern", ("audit", ("--out", ".csv"), "P")),
     ("govern", ("lineage", ("--id", None), "P")),
+    ("govern", ("provenance", ("--id", None), "P")),
     ("govern", ("repair", "--apply", "--quarantine-bad-lines", "P")),
     ("attest", ("attest", ("--out", ".jsonl"), "P")),
     ("attest", ("verify", ("--key", None), "P")),
@@ -536,6 +538,16 @@ def _check_did_its_job(res, ctx):
         assert os.path.getsize(ctx["out"]) > 0 if ctx["out"] else out.strip(), out
     elif cmd == "lineage":
         assert "r1" in out, out
+    elif cmd == "provenance":
+        assert json.loads(first) == {
+            "seq": 0,
+            "event": "add",
+            "ts": None,
+            "trust": "legacy",
+            "path": None,
+            "author_hmac": None,
+        }, out
+        assert "walrus" not in out, out
     elif cmd == "anchor":
         assert len(Path(ctx["ledger"]).read_text(encoding="utf-8").splitlines()) == 1
     elif cmd == "latest":

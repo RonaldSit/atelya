@@ -6,7 +6,22 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **`provenance <oplog> --id <rid>`** (atelya web3 goal spec B1): who wrote a record, when,
+  through which channel, and what retired it, as JSON lines with no text: its add and
+  updates (seq, ts, trust, path, the author as an HMAC with `<data_dir>/.erasure_key`), the
+  records its keyed add retired, what retired it (an explicit supersede, or a later keyed
+  add, which retires the holders of its key without a supersede line), key conflicts on
+  either side, flags, quarantine, release and forget. Read-only: on a torn last line it
+  refuses and names the repair command, and it never creates the key. A reason written as free text before 0.3.1 prints as null.
+  `tests/test_govern_provenance.py`.
+- **`verify-ots` names what an anchor does not cover**: when the chain has grown since the
+  anchor, `NOT COVERED: seq A..B were attested after this anchor`, after both `VERIFIED`
+  and `PENDING`.
+
 ### Changed
+- **`replay()`** runs through `_replay_iter()`, which `provenance` shares, so the same-key
+  supersede rule exists once. No behaviour change.
 - **README wording**: "guarantee" is no longer used; the section is now "What it does — and
   does not" (the claims rules of atelya's harness plan H3). No behaviour change.
 

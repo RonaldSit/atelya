@@ -446,6 +446,51 @@ def test_a_proof_still_covers_its_prefix_after_the_chain_grew(tmp_path, calendar
     assert r["status"] == "pending" and r["covered_last_seq"] == 2 and r["chain_last_seq"] == 3, r
 
 
+def _grow(ch, n):
+    oplog = ch[: -len(".attest.jsonl")]
+    with open(oplog, "a") as f:
+        for i in range(n):
+            f.write(
+                json.dumps(
+                    {
+                        "op": "forget",
+                        "id": f"a0000000000{i}",
+                        "ts": "1970-01-01T00:00:09.000000Z",
+                        "v": 2,
+                    }
+                )
+                + "\n"
+            )
+    gov.attest_v2(oplog)
+
+
+def test_verify_names_what_the_anchor_does_not_cover(tmp_path, calendar):
+    if not HAVE_OTS:
+        return _refuses_without_extra(
+            _need("verify_ots"), str(tmp_path / "x.ots"), str(tmp_path / "c")
+        )
+    (tmp_path / "pending").mkdir()
+    ch, proof = _anchored(tmp_path / "pending", calendar)
+    _grow(ch, 1)
+    r = _cli("verify-ots", proof, ch)
+    assert r.returncode == 3 and "NOT COVERED: seq 3..3" in r.stdout, r.stdout + r.stderr
+    (tmp_path / "confirmed").mkdir()
+    ch, proof, root = _confirmed(tmp_path / "confirmed", calendar)
+    node = FakeBitcoind(calendar.height, root)
+    try:
+        before = _cli("verify-ots", proof, ch, "--bitcoin-node", node.url)
+        _grow(ch, 2)
+        after = _cli("verify-ots", proof, ch, "--bitcoin-node", node.url)
+    finally:
+        node.close()
+    assert before.returncode == 0 and "NOT COVERED" not in before.stdout, before.stdout
+    assert (
+        after.returncode == 0
+        and "VERIFIED" in after.stdout
+        and "NOT COVERED: seq 3..4" in after.stdout
+    ), after.stdout + after.stderr
+
+
 def test_verify_from_a_digest_file(tmp_path, calendar):
     if not HAVE_OTS:
         return _refuses_without_extra(

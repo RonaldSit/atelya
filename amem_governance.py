@@ -24,6 +24,8 @@ Superseded/forgotten records are RETAINED (status change, not removal) => full a
 Features (all pure-python over the op-log; no amem / GPU / API):
   audit      — chronological timeline of every memory operation (exportable JSON/CSV)
   lineage    — one memory's full provenance: born -> updated -> superseded/forgotten, by what
+  provenance — who wrote a memory, when, through which channel, and what retired it (a later
+               keyed write retires without a supersede line); ids, codes and HMACs only, no text
   conflicts  — contradiction flags + supersede decisions: which memory won, and why
   erase      — GDPR right-to-erasure: --soft (auditable forget, text retained) vs --hard
                (true content removal by rewriting the log; the purge itself is logged)
@@ -36,6 +38,7 @@ for compliance, with the purge action itself recorded. Naive stores get this wro
 CLI:
   python amem_governance.py audit   <oplog.jsonl> [--out audit.json|audit.csv]
   python amem_governance.py lineage <oplog.jsonl> --id <rid>
+  python amem_governance.py provenance <oplog.jsonl> --id <rid>
   python amem_governance.py conflicts <oplog.jsonl>
   python amem_governance.py erase   <oplog.jsonl> --match <regex> [--hard [--drop-attest]]
   python amem_governance.py retention <oplog.jsonl> --max-age-days N [--hard [--drop-attest]]
@@ -510,17 +513,26 @@ def read_log(path, repair=True, schema=True):
 
 def replay(events):
     """Reconstruct current records {id:{text,key,created_at,status,history:[ops]}} from the log."""
-    rec = {}
-    order = []
-    for ev in events:
+    rec, order = {}, []
+    for _step in _replay_iter(events, rec, order):
+        pass
+    return rec, order
+
+
+def _replay_iter(events, rec, order):
+    """replay() one event at a time: yields (index, event, ids the event's keyed add retired),
+    with rec and order updated as replay() leaves them after that event."""
+    for i, ev in enumerate(events):
         op = ev.get("op", "add")
         rid = ev.get("id")
+        retired = []
         if op == "add":
             if rid and ev.get("key") is not None:
                 for record in rec.values():  # same-key supersede (the lifecycle)
                     if record["status"] == "active" and record.get("key") == ev.get("key"):
                         record["status"] = "superseded"
                         record["history"].append("superseded-by-" + str(rid))
+                        retired.append(record["id"])
             if rid is None:
                 rid = f"_auto{len(order)}"
             rec[rid] = {
@@ -546,7 +558,77 @@ def replay(events):
             rec[rid]["status"] = "purged"
             rec[rid]["text"] = "<redacted>"
             rec[rid]["history"].append("purge")
-    return rec, order
+        yield i, ev, retired
+
+
+_PROV_CODE = re.compile(r"[a-z][a-z0-9_]{0,63}")  # a reason code; anything else is not printed
+
+
+def provenance(events, rid, key=None):
+    """The events that concern record rid, in op-log order, one row each (its "event" is the
+    event's op, or "retired" for a retirement by a later keyed add), with no text: its add and updates
+    (seq, ts, trust, path, author as an HMAC with key), the records its keyed add retired, what
+    retired it (an explicit supersede, or a later keyed add, which retires the holders of its key
+    without a supersede line: the writer's src, the time, the retiring record), key conflicts on
+    either side, flags, quarantine, release and forget. A reason that is not a code (free text
+    written before 0.3.1) prints as null."""
+
+    def when(ev):
+        return ev["ts"] if isinstance(ev.get("ts"), str) else None
+
+    def code(v):
+        return v if isinstance(v, str) and _PROV_CODE.fullmatch(v) else None
+
+    def who(ev):
+        src = ev.get("src") if isinstance(ev.get("src"), dict) else None
+        if src is None:
+            return {
+                "trust": "legacy" if ev.get("op", "add") == "add" else None,
+                "path": None,
+                "author_hmac": None,
+            }
+        author = src.get("author")
+        return {
+            "trust": src.get("trust"),
+            "path": src.get("path"),
+            "author_hmac": hmac.new(key, author.encode("utf-8"), hashlib.sha256).hexdigest()
+            if key is not None and isinstance(author, str)
+            else None,
+        }
+
+    rows, rec, order = [], {}, []
+    for i, ev, retired in _replay_iter(events, rec, order):
+        op, eid = ev.get("op", "add"), ev.get("id")
+        if op in ("add", "update") and eid == rid:
+            row = dict({"seq": i, "event": op, "ts": when(ev)}, **who(ev))
+            if retired:
+                row["retires"] = retired
+            rows.append(row)
+        elif op == "add" and rid in retired:
+            rows.append(
+                {
+                    "seq": i,
+                    "event": "retired",
+                    "ts": when(ev),
+                    "by": eid,
+                    "how": "key",
+                    "writer": who(ev),
+                }
+            )
+        elif op == "key_conflict" and rid in (eid, ev.get("holder")):
+            row = {"seq": i, "event": op, "ts": when(ev), "reason": code(ev.get("reason"))}
+            row.update({"holder": ev.get("holder")} if eid == rid else {"by": eid})
+            rows.append(row)
+        elif op == "flag" and rid in (ev.get("a"), ev.get("b")):
+            other = ev.get("b") if ev.get("a") == rid else ev.get("a")
+            rows.append(
+                {"seq": i, "event": op, "ts": when(ev), "why": code(ev.get("why")), "with": other}
+            )
+        elif op in ("supersede", "quarantine", "release") and eid == rid:
+            rows.append({"seq": i, "event": op, "ts": when(ev), "reason": code(ev.get("reason"))})
+        elif op in ("forget", "purge") and eid == rid:
+            rows.append({"seq": i, "event": op, "ts": when(ev)})
+    return rows
 
 
 def audit_timeline(events):
@@ -1709,6 +1791,7 @@ def main(argv=None):
         choices=[
             "audit",
             "lineage",
+            "provenance",
             "conflicts",
             "erase",
             "retention",
@@ -1788,7 +1871,9 @@ def main(argv=None):
         # verify-chain reads a chain file, not an op-log: never repair it, any bad
         # line is evidence of tampering, and the op-log schema version does not apply
         events = read_log(
-            args.oplog, repair=args.cmd != "verify-chain", schema=args.cmd != "verify-chain"
+            args.oplog,
+            repair=args.cmd not in ("verify-chain", "provenance"),  # provenance only reads
+            schema=args.cmd != "verify-chain",
         )
     except OplogError as e:
         if args.cmd == "verify-chain":
@@ -1895,6 +1980,20 @@ def main(argv=None):
             print(
                 f"  seq={i:<4} {op:<11} {json.dumps({k: v for k, v in ev.items() if k != 'op'}, ensure_ascii=False)[:100]}"
             )
+    elif args.cmd == "provenance":
+        if not args.id:
+            sys.exit("--id required")
+        key = _existing_key(os.path.dirname(os.path.abspath(args.oplog)))
+        if key is None:
+            print(
+                f"note: no {ERASURE_KEY_NAME} next to {args.oplog}: author_hmac is null",
+                file=sys.stderr,
+            )
+        rows = provenance(events, args.id, key)
+        if not rows:
+            sys.exit(f"no event names {args.id}")
+        for row in rows:
+            print(json.dumps(row))
     elif args.cmd == "conflicts":
         c = conflicts(events)
         print(f"{len(c)} contradiction(s):")
@@ -2001,13 +2100,18 @@ def _ots_main(args):
             btc_network=args.btc_network,
         )
         print(json.dumps(r))
+        covered, last = r.get("covered_last_seq"), r.get("chain_last_seq")
+        gap = isinstance(covered, int) and isinstance(last, int) and last > covered
         if r["status"] == "pending":
             print("  PENDING: no Bitcoin attestation yet (run upgrade-ots later)")
-            return 3
-        print(
-            f"  VERIFIED: Bitcoin block {r['height']} attests the chain up to seq {r['covered_last_seq']}"
-        )
-        return 0
+        else:
+            print(f"  VERIFIED: Bitcoin block {r['height']} attests the chain up to seq {covered}")
+        if gap:
+            print(
+                f"  NOT COVERED: seq {covered + 1}..{last} were attested after this anchor; "
+                "anchor again to cover them"
+            )
+        return 3 if r["status"] == "pending" else 0
     except (OtsUnavailable, OtsError, ChainMismatch, OplogError, OSError) as e:
         sys.exit(str(e))
 
