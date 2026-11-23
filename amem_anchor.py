@@ -358,8 +358,6 @@ def cmd_latest(ledger_path, label, akey):
 
 # ------------------------------------------------------------------ main ----
 def main(argv=None):
-    if hasattr(signal, "SIGPIPE"):  # standard CLI: exit quietly (141) when piped to head/less
-        signal.signal(signal.SIGPIPE, signal.SIG_DFL)
     parser = argparse.ArgumentParser(
         description="external checkpoint/witness ledger for amem attest chains"
     )
@@ -464,5 +462,16 @@ def _selftest():
     return 0
 
 
+def cli(argv=None):
+    """Entry point of the command line (`atelya-anchor`, `python amem_anchor.py`).
+
+    Piped to head or less, a command line ends quietly (141) when the reader closes the pipe. That
+    needs SIGPIPE at its default, which is a setting of the whole process: it is made here and not
+    in main(), which a longer-lived process may call."""
+    if hasattr(signal, "SIGPIPE"):
+        signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+    return main(argv)
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(cli())

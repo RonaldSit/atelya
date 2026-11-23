@@ -349,8 +349,6 @@ def _load_key(args):
 
 
 def main(argv=None):
-    if hasattr(signal, "SIGPIPE"):  # standard CLI: exit quietly (141) when piped to head/less
-        signal.signal(signal.SIGPIPE, signal.SIG_DFL)
     parser = argparse.ArgumentParser(
         description="tamper-evident hash-chained attestation for amem op-log"
     )
@@ -491,5 +489,16 @@ def _selftest():
     return 0
 
 
+def cli(argv=None):
+    """Entry point of the command line (`atelya-attest`, `python amem_attest.py`).
+
+    Piped to head or less, a command line ends quietly (141) when the reader closes the pipe. That
+    needs SIGPIPE at its default, which is a setting of the whole process: it is made here and not
+    in main(), which a longer-lived process may call."""
+    if hasattr(signal, "SIGPIPE"):
+        signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+    return main(argv)
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(cli())

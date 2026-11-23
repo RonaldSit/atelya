@@ -11,7 +11,7 @@
    ],
    "suites": {
     "pytest-tests": {
-     "passed": 445
+     "passed": 455
     }
    }
   }
