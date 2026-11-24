@@ -70,8 +70,9 @@ on any mismatch), then appends one redaction record per purged record naming the
 the attested lines it removed. Chains written elsewhere with --out are not checked.
 
 Attest v2 (attest --v2; atelya docs/attest-v2.md): one entry per op-log line holding only a
-digest of the line's exact bytes: a plain SHA-256 when the line names its record by a uuid4
-(122 random bits), else HMAC-SHA256 with <data dir>/.erasure_key (atelya 0.3.4 and earlier
+digest of the line's exact bytes: a plain SHA-256 when every record the line names has a
+uuid4 id (122 random bits) and a line of a type without record content holds none, else
+HMAC-SHA256 with <data dir>/.erasure_key (amem_attest.unguessable; atelya 0.3.4 and earlier
 wrote 48-bit ids, so verifying their records' entries needs that key). Re-running attest --v2
 verifies the chain, then appends entries for the new lines. verify-chain recomputes every
 line from the op-log (--oplog, or the chain path without .attest.jsonl) and names the first
@@ -937,7 +938,6 @@ _EV_ID = re.compile(r"[0-9A-Za-z_-]{1,64}")  # a record id, never free text
 _EV_CODE = re.compile(r"[a-z][a-z0-9_]{0,63}")  # a reason code
 _EV_HMAC_REASON = re.compile(r"erasure:hmac-sha256:[0-9a-f]{64}")
 _EV_OP = re.compile(r"[a-z][a-z_]{0,31}")
-_EV_UUID4 = re.compile(r"[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}")  # amem_attest.unguessable
 _EV_TRUSTS = ("user", "agent", "external", "legacy")
 _EV_PATHS = ("api", "extract", "distill", "mcp", "fourthdoor", "kv_extract")
 _EMIT_PENDING = []  # (op-log path, the exact bytes of a line this process wrote)
@@ -945,10 +945,10 @@ _EMIT_PENDING = []  # (op-log path, the exact bytes of a line this process wrote
 
 def audit_needs_key(event):
     """True when audit_event needs the data directory's key for this line: its digest is an
-    HMAC (the line does not name its record by a uuid4), or its src names an author."""
-    rid = event.get("id")
+    HMAC (amem_attest.unguessable says the line may not be plain), or its src names an
+    author."""
     src = event.get("src")
-    return not (isinstance(rid, str) and _EV_UUID4.fullmatch(rid)) or (
+    return not _attest_module().unguessable(event, EVENT_FIELDS) or (
         isinstance(src, dict) and isinstance(src.get("author"), str)
     )
 
@@ -956,12 +956,11 @@ def audit_needs_key(event):
 def audit_event(store_path, raw, event, key, retires=None):
     """The CloudEvent for one op-log line (raw: its exact bytes without the newline; event:
     the object they hold). id is the line's digest, the same as its attest v2 entry: a plain
-    SHA-256 when the line names its record by a uuid4, else HMAC-SHA256 with key. retires:
+    SHA-256 when amem_attest.unguessable allows it, else HMAC-SHA256 with key. retires:
     the records a keyed add retired (no line names them), ids only."""
     op = event.get("op", "add")
     listed = EVENT_FIELDS.get(op, {}).get("fields", ()) if isinstance(op, str) else ()
-    rid = event.get("id")
-    if isinstance(rid, str) and _EV_UUID4.fullmatch(rid):
+    if _attest_module().unguessable(event, EVENT_FIELDS):
         digest = hashlib.sha256(raw).hexdigest()
         data = {"line_sha256": digest}
     else:

@@ -182,13 +182,60 @@ def is_v2(chain):
     return bool(chain) and isinstance(chain[0], dict) and chain[0].get("v") == CHAIN_V2
 
 
-def unguessable(event):
-    """True when the line names its record by a uuid4 in hex (122 random bits): hashing a
-    guess of its content cannot confirm it, so its plain sha256 may be shown to anyone.
-    atelya 0.3.4 and earlier wrote ids of 48 bits (12 hex digits): every line about such a
-    record is keyed. An engine that gives new records a uuid4 gets plain entries for them."""
-    rid = event.get("id") if isinstance(event, dict) else None
-    return isinstance(rid, str) and _UUID4_HEX.fullmatch(rid) is not None
+REF_FIELDS = ("id", "a", "b", "holder")  # the fields of a line that name a record
+_REASON_CODE = re.compile(r"[a-z][a-z0-9_]{0,63}")
+_REASON_HMAC = re.compile(r"erasure:hmac-sha256:[0-9a-f]{64}")
+
+
+def _event_registry():
+    """EVENT_FIELDS of amem_governance (the op-log's event types and their fields)."""
+    try:
+        import amem_governance
+    except ImportError:  # loaded from another directory: use the copy next to this file
+        import importlib.util
+
+        here = os.path.join(os.path.dirname(os.path.abspath(__file__)), "amem_governance.py")
+        spec = importlib.util.spec_from_file_location("amem_governance", here)
+        amem_governance = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(amem_governance)
+    return amem_governance.EVENT_FIELDS
+
+
+def unguessable(event, registry=None):
+    """True when the line's plain sha256 may be shown to anyone: hashing a guess of its
+    content cannot confirm it. Both conditions must hold (owner decision of 2026-11-24):
+
+    1. every field of the line that names a record (id, a, b, holder) is a uuid4 in hex
+       (122 random bits), and the line has at least one. One reference of 48 bits (the ids
+       of atelya 0.3.4 and earlier) and the line is keyed;
+    2. the event registry knows the line's type, and a type that carries no record content
+       has none on this line either: only fields the registry lists for the type, and a
+       reason or why that is a reason code (or an erasure HMAC). An old flag whose why is
+       text is keyed, and so is a soft erase's forget line (its reason is the pattern).
+
+    registry: EVENT_FIELDS (default: that of amem_governance)."""
+    if not isinstance(event, dict):
+        return False
+    refs = [event[f] for f in REF_FIELDS if event.get(f) is not None]
+    if not refs or not all(isinstance(r, str) and _UUID4_HEX.fullmatch(r) for r in refs):
+        return False
+    op = event.get("op", "add")
+    known = _event_registry() if registry is None else registry
+    spec = known.get(op) if isinstance(op, str) else None
+    if spec is None:
+        return False
+    if spec["record"]:
+        return True
+    if not set(event) <= set(spec["fields"]):
+        return False
+    for f in ("reason", "why"):
+        if f in event:
+            v = event[f]
+            if not isinstance(v, str):
+                return False
+            if not (_REASON_CODE.fullmatch(v) or _REASON_HMAC.fullmatch(v)):
+                return False
+    return True
 
 
 def _line_fields(raw, event, line_key):
