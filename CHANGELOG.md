@@ -6,6 +6,12 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- Wording only (no behaviour change): the attest v2 texts said every id atelya writes has
+  48 bits. That holds for atelya 0.3.4 and earlier; an engine that gives new records a uuid4
+  gets plain entries for the lines naming such a record by `id` (`amem_attest.unguessable`,
+  unchanged). `ATTESTATION.md`, the docstrings of `amem_attest.py` and `amem_governance.py`.
+
 ### Added
 - **`provenance <oplog> --id <rid>`** (atelya web3 goal spec B1): who wrote a record, when,
   through which channel, and what retired it, as JSON lines with no text: its add and

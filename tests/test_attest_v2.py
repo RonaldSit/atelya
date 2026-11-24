@@ -2,7 +2,7 @@
 
 Entry: {"v": 2, "seq": n, "line_sha256" | "line_hmac" + "keyed": true, "prev"}, no payload.
 A line that names its record by a uuid4 (122 random bits) gets a plain sha256 of its
-exact bytes; any other line (every id atelya writes today has 48 bits) gets an
+exact bytes; any other line (atelya 0.3.4 and earlier wrote ids of 48 bits) gets an
 HMAC-SHA256 with <data_dir>/.erasure_key, so its content cannot be confirmed by
 guessing. A hard purge appends a redaction record {"v": 2, "redact": [seq...],
 "purge_marker": id, "prev"} instead of needing --drop-attest; v1 chains keep the
@@ -181,7 +181,7 @@ def test_a_uuid4_line_is_a_plain_sha256_and_any_other_line_is_keyed(tmp_path):
     "rid,plain",
     [
         (UUID4_ID, True),
-        ("5f0c2b1e9a3d", False),  # 12 hex: what atelya writes today (48 bits)
+        ("5f0c2b1e9a3d", False),  # 12 hex: what atelya 0.3.4 and earlier wrote (48 bits)
         ("5f0c2b1e9a3d3c7e8b6a1f2d3c4b5a69", False),  # 32 hex, version nibble 3
         ("5f0c2b1e9a3d4c7e7b6a1f2d3c4b5a69", False),  # variant nibble 7
         ("5F0C2B1E9A3D4C7E8B6A1F2D3C4B5A69", False),  # upper case: not what uuid4().hex gives
