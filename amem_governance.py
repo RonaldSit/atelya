@@ -124,6 +124,7 @@ import contextlib
 import csv
 import datetime
 import errno
+import functools
 import hashlib
 import hmac
 import json
@@ -437,6 +438,7 @@ def _append_lines(path, lines):
             _fix_tail(path, f, keep_torn=True, terminate_valid=True)
             for line in lines:
                 f.write((line + "\n").encode("utf-8"))
+    _EMIT_PENDING.extend((path, line.encode("utf-8")) for line in lines)
 
 
 def _load_lines(path, repair=True, schema=True):
@@ -482,12 +484,12 @@ def _rewrite(path, raw_lines, extra_events):
     """Caller holds the lock. Atomically replace the op-log with raw_lines
     (bytes, unchanged, in order) followed by extra_events."""
     tmp = path + ".tmp"
+    added = [json.dumps(ev, ensure_ascii=False).encode("utf-8") for ev in extra_events]
     with open(tmp, "wb") as f:
-        for raw in raw_lines:
+        for raw in list(raw_lines) + added:
             f.write(raw + b"\n")
-        for ev in extra_events:
-            f.write((json.dumps(ev, ensure_ascii=False) + "\n").encode("utf-8"))
     os.replace(tmp, path)
+    _EMIT_PENDING.extend((path, raw) for raw in added)
 
 
 def _promote(ev):
@@ -919,6 +921,180 @@ def _hmac_hex(oplog_path, value):
     return hmac.new(key, value.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
+# ---- audit events for the lines this tool writes (atelya web3-features-spec W4) ----------
+# One CloudEvents 1.0 object per op-log line written here (the forget lines of a soft erase or
+# retention, purge markers, release), with the same content-free data as the engine's events
+# for its own lines (atelya amem/emit.py: its envelope and audit_event must give the same
+# object for the same line, and its tests compare the two). EVENT_FIELDS decides what may
+# leave: of a line's fields only those the registry lists for its type, and of those only
+# record ids, reason codes, src.trust and src.path, and HMACs. Never text, a slot key, a
+# pattern or a note. Sinks, as in the engine: the JSON Lines file named by AMEM_EMIT_FILE and
+# the entry points of the group atelya.emit_hooks. Delivery is best-effort, after the op-log
+# lock is released; a sink that fails is counted and never fails the command.
+EMIT_HOOK_GROUP = "atelya.emit_hooks"
+EMIT_FILE_ENV = "AMEM_EMIT_FILE"
+_EV_ID = re.compile(r"[0-9A-Za-z_-]{1,64}")  # a record id, never free text
+_EV_CODE = re.compile(r"[a-z][a-z0-9_]{0,63}")  # a reason code
+_EV_HMAC_REASON = re.compile(r"erasure:hmac-sha256:[0-9a-f]{64}")
+_EV_OP = re.compile(r"[a-z][a-z_]{0,31}")
+_EV_UUID4 = re.compile(r"[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}")  # amem_attest.unguessable
+_EV_TRUSTS = ("user", "agent", "external", "legacy")
+_EV_PATHS = ("api", "extract", "distill", "mcp", "fourthdoor", "kv_extract")
+_EMIT_PENDING = []  # (op-log path, the exact bytes of a line this process wrote)
+
+
+def audit_needs_key(event):
+    """True when audit_event needs the data directory's key for this line: its digest is an
+    HMAC (the line does not name its record by a uuid4), or its src names an author."""
+    rid = event.get("id")
+    src = event.get("src")
+    return not (isinstance(rid, str) and _EV_UUID4.fullmatch(rid)) or (
+        isinstance(src, dict) and isinstance(src.get("author"), str)
+    )
+
+
+def audit_event(store_path, raw, event, key, retires=None):
+    """The CloudEvent for one op-log line (raw: its exact bytes without the newline; event:
+    the object they hold). id is the line's digest, the same as its attest v2 entry: a plain
+    SHA-256 when the line names its record by a uuid4, else HMAC-SHA256 with key. retires:
+    the records a keyed add retired (no line names them), ids only."""
+    op = event.get("op", "add")
+    listed = EVENT_FIELDS.get(op, {}).get("fields", ()) if isinstance(op, str) else ()
+    rid = event.get("id")
+    if isinstance(rid, str) and _EV_UUID4.fullmatch(rid):
+        digest = hashlib.sha256(raw).hexdigest()
+        data = {"line_sha256": digest}
+    else:
+        digest = hmac.new(key, raw, hashlib.sha256).hexdigest()
+        data = {"line_hmac": digest, "keyed": True}
+    for f in REF_FIELDS:
+        v = event.get(f)
+        if f in listed and isinstance(v, str) and _EV_ID.fullmatch(v):
+            data[f] = v
+    for f in ("reason", "why"):
+        v = event.get(f)
+        if f in listed and isinstance(v, str):
+            if _EV_CODE.fullmatch(v) or _EV_HMAC_REASON.fullmatch(v):
+                data[f] = v
+    gone = [r for r in (retires or []) if isinstance(r, str) and _EV_ID.fullmatch(r)]
+    if gone:
+        data["retires"] = gone
+    src = event.get("src")
+    if "src" in listed and isinstance(src, dict):
+        out = {}
+        if src.get("trust") in _EV_TRUSTS:
+            out["trust"] = src["trust"]
+        if src.get("path") in _EV_PATHS:
+            out["path"] = src["path"]
+        if isinstance(src.get("author"), str):
+            out["author_hmac"] = hmac.new(
+                key, src["author"].encode("utf-8"), hashlib.sha256
+            ).hexdigest()
+        data["src"] = out
+    stem = os.path.basename(store_path)
+    if stem.endswith(".jsonl"):
+        stem = stem[: -len(".jsonl")]
+    kind = op if isinstance(op, str) and _EV_OP.fullmatch(op) else "unknown"
+    ce = {
+        "specversion": "1.0",
+        "id": digest,
+        "source": f"urn:atelya:store:{stem}",
+        "type": f"io.atelya.memory.{kind}",
+    }
+    if isinstance(event.get("ts"), str):
+        ce["time"] = event["ts"]
+    ce["datacontenttype"] = "application/json"
+    ce["data"] = data
+    return ce
+
+
+def _emit_sinks():
+    """([(name, fn)], failures): the file of AMEM_EMIT_FILE, then the installed entry points
+    of atelya.emit_hooks by name. A hook that cannot be loaded is a failure, not a sink."""
+    sinks, failed = [], 0
+    target = os.environ.get(EMIT_FILE_ENV)
+    if target:
+
+        def to_file(event, _path=target):
+            with open(_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n")
+
+        sinks.append(("file", to_file))
+    try:
+        from importlib.metadata import entry_points
+
+        eps = sorted(entry_points(group=EMIT_HOOK_GROUP), key=lambda e: e.name)
+    except Exception:
+        eps, failed = [], failed + 1
+    for ep in eps:
+        try:
+            sinks.append((ep.name, ep.load()))
+        except Exception as e:
+            failed += 1
+            print(f"audit event hook {ep.name} failed to load: {type(e).__name__}", file=sys.stderr)
+    return sinks, failed
+
+
+def _emit_flush():
+    """Deliver the audit events of the lines written since the last flush, in the order they
+    were written. Returns {"delivered": n, "failed": n}, or None when no sink is active (then
+    nothing is built and no key is read or created). Never raises."""
+    pending = _EMIT_PENDING[:]
+    del _EMIT_PENDING[:]
+    if not pending:
+        return None
+    try:
+        sinks, failed = _emit_sinks()
+    except Exception:
+        return {"delivered": 0, "failed": 1}
+    if not sinks:
+        return None if not failed else {"delivered": 0, "failed": failed}
+    delivered, keys = 0, {}
+    for path, raw in pending:
+        try:
+            category, event = classify(raw)
+            if category is not None:
+                continue
+            key = None
+            if audit_needs_key(event):
+                data_dir = os.path.dirname(os.path.abspath(path))
+                if data_dir not in keys:
+                    keys[data_dir] = erasure_key(data_dir)
+                key = keys[data_dir]
+            ce = audit_event(path, raw, event, key)
+        except Exception as e:
+            failed += 1
+            print(f"audit event not built: {type(e).__name__}", file=sys.stderr)
+            continue
+        for name, fn in sinks:
+            try:
+                fn(json.loads(json.dumps(ce)))
+                delivered += 1
+            except Exception as e:
+                failed += 1
+                print(f"audit event hook {name} failed: {type(e).__name__}", file=sys.stderr)
+    return {"delivered": delivered, "failed": failed}
+
+
+def _emits(fn):
+    """A command that writes op-log lines: once it has returned (so its lock is released) the
+    audit events of those lines are delivered, and their count goes into its result as
+    audit_events when a sink is active."""
+
+    @functools.wraps(fn)
+    def wrap(*a, **k):
+        out = None
+        try:
+            out = fn(*a, **k)
+        finally:
+            counts = _emit_flush()
+            if counts is not None and isinstance(out, dict):
+                out["audit_events"] = counts
+        return out
+
+    return wrap
+
+
 # ---- OpenTimestamps anchoring of the v2 head (atelya web3-features-spec W5) --------------
 OTS_EXTRA = (
     "the OpenTimestamps commands need the extra atelya-attest[ots] (Python 3.11 or later): "
@@ -1224,6 +1400,7 @@ def list_quarantine(path):
     return {"quarantined": [r for r in held if r in rec and rec[r]["status"] != "purged"]}
 
 
+@_emits
 def release(path, rid):
     """Re-certify a record as user (the operator's decision): append a content-free
     release event and bump the purge epoch so running doors reload."""
@@ -1532,6 +1709,7 @@ def run_purge_hooks(oplog_path, purged, match=None):
     return results
 
 
+@_emits
 def erase(path, pattern, hard=False, drop_attest=False):
     """GDPR right-to-erasure. soft: append forget events (auditable, text retained).
     hard: rewrite the log dropping the matched records' content entirely (see
@@ -1607,6 +1785,7 @@ def erase(path, pattern, hard=False, drop_attest=False):
     return out
 
 
+@_emits
 def retention(path, max_age_days=None, max_active=None, hard=False, drop_attest=False):
     """Retire by age and/or active-count window. A hard purge follows the same rules
     as a hard erase (_purge_plan, side files, attest guard). The read and the write

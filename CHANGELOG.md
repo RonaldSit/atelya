@@ -6,6 +6,18 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Audit events for the op-log lines `atelya-govern` writes** (atelya web3-features-spec W4):
+  the forget lines of a soft erase or retention, purge markers and `release` each give one
+  CloudEvents 1.0 object, to the JSON Lines file named by `AMEM_EMIT_FILE` and to the entry
+  points of the group `atelya.emit_hooks`, the engine's sinks. Delivery is best-effort and
+  happens after the op-log lock is released; a sink that fails is counted and never fails the
+  command. With a sink active the command's result holds
+  `"audit_events": {"delivered": n, "failed": n}`; without one nothing is built and no key is
+  read or created. `amem_governance.audit_event` decides what may leave from the event
+  registry (`EVENT_FIELDS`): record ids, reason codes, `src.trust` and `src.path`, HMACs;
+  never text, a slot key, an erase pattern or a note. `tests/test_govern_emit.py`.
+
 ### Changed
 - Wording only (no behaviour change): the attest v2 texts said every id atelya writes has
   48 bits. That holds for atelya 0.3.4 and earlier; an engine that gives new records a uuid4
