@@ -160,12 +160,21 @@ blocks hard purges. `attest --v2` writes a chain of digests instead:
   appended by a hard purge after the lines it covers;
 - head: the SHA-256 of the last entry's canonical JSON. No entry holds any text.
 
-A line gets a plain SHA-256 only when it names its record by a uuid4 (122 random
-bits); any other line could be confirmed by guessing its content, so it is keyed.
-atelya 0.3.4 and earlier wrote ids of 48 bits, so every entry of their records is keyed
-and verifying needs the data directory's `.erasure_key`. An engine that gives new records
-a uuid4 gets plain entries for the lines that name such a record by `id`; a line that
-names records only in other fields (a contradiction flag) stays keyed.
+A line gets a plain SHA-256 only when both of these hold (`amem_attest.unguessable`); any
+other line could be confirmed by guessing its content, so it is keyed:
+
+1. every field of the line that names a record (`id`, `a`, `b`, `holder`) is a uuid4 in hex
+   (122 random bits), and the line has at least one. One reference of 48 bits and the line
+   is keyed;
+2. the event registry (`EVENT_FIELDS`) knows the line's type, and a line of a type that
+   carries no record content holds none: only the fields the registry lists for the type,
+   and a `reason` or `why` that is a reason code (or an erasure HMAC).
+
+atelya 0.3.4 and earlier wrote ids of 48 bits, so every entry that names one of their
+records is keyed and verifying needs the data directory's `.erasure_key`. An engine that
+gives new records a uuid4 gets plain entries for their lines, a contradiction flag between
+two such records included. Keyed whatever the ids: an old flag whose `why` is text, and the
+forget line of a soft erase (its `reason` holds the pattern).
 
 ```bash
 atelya-govern attest log.jsonl --v2

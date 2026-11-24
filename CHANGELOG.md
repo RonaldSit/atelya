@@ -6,6 +6,19 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **Which attest v2 lines get a plain SHA-256** (`amem_attest.unguessable`; for 0.2.1). Before,
+  the rule looked at `id` alone. Now both must hold: every field of the line that names a
+  record (`id`, `a`, `b`, `holder`) is a uuid4 in hex, and there is at least one; and the event
+  registry knows the line's type, with no content on a line of a type that carries none (only
+  the registry's fields, a `reason` or `why` that is a reason code or an erasure HMAC). So a
+  contradiction flag between two uuid4 records is plain, and a store of such records with
+  flags verifies without the key. Keyed now, where the old rule gave a plain entry: a line that
+  also names a 48-bit record (a `key_conflict` whose holder is an older record), a line of a
+  type the registry does not know, a soft erase's forget line (its `reason` is the pattern).
+  Existing chains still verify: an entry is checked as the kind it was written as.
+  `atelya-govern`'s audit events take their digest by the same rule.
+
 ### Added
 - **Audit events for the op-log lines `atelya-govern` writes** (atelya web3-features-spec W4):
   the forget lines of a soft erase or retention, purge markers and `release` each give one

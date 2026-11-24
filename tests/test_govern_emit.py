@@ -68,8 +68,7 @@ def raw_lines(path):
 
 
 def digest_of(path, raw):
-    ev = json.loads(raw)
-    if ev.get("id") == NEW:
+    if G._attest_module().unguessable(json.loads(raw), G.EVENT_FIELDS):
         return {"line_sha256": hashlib.sha256(raw).hexdigest()}
     key = G.erasure_key(os.path.dirname(path))
     return {"line_hmac": hmac.new(key, raw, hashlib.sha256).hexdigest(), "keyed": True}
@@ -107,10 +106,8 @@ def test_a_soft_erase_emits_one_event_per_forget_line_without_the_pattern(oplog,
     with open(sink.path, encoding="utf-8") as f:
         assert "zebra" not in f.read()
     assert {e["data"]["id"] for e in events} == {OLD_A, NEW}
-    assert ["keyed" in e["data"] for e in sorted(events, key=lambda e: e["data"]["id"] == NEW)] == [
-        True,
-        False,
-    ]
+    # the pattern is in each forget line's reason, so both lines are keyed, the new record's too
+    assert all(e["data"].get("keyed") is True and "line_sha256" not in e["data"] for e in events)
 
 
 def test_a_soft_retention_emits_its_forget_lines_with_the_reason_code(oplog, sink):
@@ -283,3 +280,52 @@ def test_the_key_is_needed_only_for_a_keyed_line_or_an_author():
     raw = json.dumps(line).encode()
     event = G.audit_event("/x/user_x.jsonl", raw, line, None)
     assert event["id"] == hashlib.sha256(raw).hexdigest() and "keyed" not in event["data"]
+
+
+FLAG_NEW = {
+    "op": "flag",
+    "a": NEW,
+    "b": "5f0c2b1e9a3d4c7e8b6a1f2d3c4b5a69",
+    "why": "negation",
+    "ts": TS,
+    "v": 2,
+}
+
+
+@pytest.mark.parametrize(
+    "line,plain",
+    [
+        (FLAG_NEW, True),
+        (dict(FLAG_NEW, a=OLD_A), False),
+        (dict(FLAG_NEW, b=OLD_B), False),
+        (dict(FLAG_NEW, why="the two notes disagree about the gate"), False),
+        (
+            {"op": "key_conflict", "id": NEW, "holder": OLD_B, "reason": "trust", "ts": TS, "v": 2},
+            False,
+        ),
+        ({"op": "forget", "id": NEW, "reason": "erasure:/zebra plan/", "ts": TS, "v": 2}, False),
+        ({"op": "forget", "id": NEW, "reason": "retention", "ts": TS, "v": 2}, True),
+    ],
+    ids=[
+        "flag new-new",
+        "flag old a",
+        "flag old b",
+        "flag text why",
+        "conflict old holder",
+        "erase pattern",
+        "retention",
+    ],
+)
+def test_an_event_has_the_digest_its_attest_entry_has(line, plain):
+    raw = json.dumps(line).encode()
+    key = b"k" * 32
+    assert G.audit_needs_key(line) is (not plain)
+    event = G.audit_event("/x/user_x.jsonl", raw, line, None if plain else key)
+    entry = G._attest_module().extend_chain_v2([], [(raw, line)], None if plain else key)[0]
+    digest = {k: entry[k] for k in ("line_sha256", "line_hmac", "keyed") if k in entry}
+    assert {
+        k: event["data"][k] for k in ("line_sha256", "line_hmac", "keyed") if k in event["data"]
+    } == digest
+    assert ("line_sha256" in digest) is plain and event["id"] == (
+        digest.get("line_sha256") or digest["line_hmac"]
+    )

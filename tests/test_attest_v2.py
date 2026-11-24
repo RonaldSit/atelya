@@ -586,3 +586,157 @@ def test_a_failed_rewrite_leaves_the_oplog_and_the_chain_consistent(tmp_path, mo
         gov.erase(p, "green door", hard=True)
     assert (open(p, "rb").read(), open(p + ".attest.jsonl", "rb").read()) == before
     assert verify(p)["ok"]
+
+
+# ---- which lines may be plain (owner decision of 2026-11-24) ---------------------------------
+# Both conditions must hold. 1: every field of the line that names a record (id, a, b, holder)
+# is a uuid4 in hex, and there is at least one. 2: the event registry knows the line's type,
+# and a type that carries no record content has none on this line either: only fields the
+# registry lists for it, and a reason or why that is a reason code (or an erasure HMAC).
+NEW_A, NEW_B = UUID4_ID, "8129af40e22c4400b3828813ec7a5410"
+OLD_A, OLD_B = "5f0c2b1e9a3d", "0a1b2c3d4e5f"
+TS = "2026-11-24T00:00:00.000000Z"
+HMAC_REASON = "erasure:hmac-sha256:" + "ab" * 32
+PLAIN_VECTORS = [
+    (
+        "a flag between two uuid4 records",
+        {"op": "flag", "a": NEW_A, "b": NEW_B, "why": "negation"},
+        True,
+    ),
+    (
+        "a flag whose a has 48 bits",
+        {"op": "flag", "a": OLD_A, "b": NEW_B, "why": "negation"},
+        False,
+    ),
+    (
+        "a flag whose b has 48 bits",
+        {"op": "flag", "a": NEW_A, "b": OLD_B, "why": "negation"},
+        False,
+    ),
+    (
+        "an old flag whose why is text",
+        {"op": "flag", "a": NEW_A, "b": NEW_B, "why": "numeric mismatch ['3'] vs ['4'] (cos=0.91)"},
+        False,
+    ),
+    (
+        "a flag between two old records",
+        {"op": "flag", "a": OLD_A, "b": OLD_B, "why": "negation"},
+        False,
+    ),
+    ("a flag without a why", {"op": "flag", "a": NEW_A, "b": NEW_B}, True),
+    (
+        "a flag with a field the registry does not list",
+        {"op": "flag", "a": NEW_A, "b": NEW_B, "text": "x"},
+        False,
+    ),
+    (
+        "a key conflict of two uuid4 records",
+        {"op": "key_conflict", "id": NEW_A, "holder": NEW_B, "reason": "trust"},
+        True,
+    ),
+    (
+        "a key conflict whose holder has 48 bits",
+        {"op": "key_conflict", "id": NEW_A, "holder": OLD_B, "reason": "trust"},
+        False,
+    ),
+    (
+        "a key conflict without a holder",
+        {"op": "key_conflict", "id": NEW_A, "holder": None, "reason": "fragment"},
+        True,
+    ),
+    ("a forget", {"op": "forget", "id": NEW_A}, True),
+    ("a forget by retention", {"op": "forget", "id": NEW_A, "reason": "retention"}, True),
+    (
+        "a soft erase: its reason is the pattern",
+        {"op": "forget", "id": NEW_A, "reason": "erasure:/zebra plan/"},
+        False,
+    ),
+    (
+        "a purge marker",
+        {"op": "purge", "id": NEW_A, "reason": HMAC_REASON, "note": "content removed"},
+        True,
+    ),
+    (
+        "a purge marker that names no record",
+        {"op": "purge", "id": None, "reason": HMAC_REASON},
+        False,
+    ),
+    ("a supersede", {"op": "supersede", "id": NEW_A, "reason": "trust_upgrade"}, True),
+    ("a quarantine", {"op": "quarantine", "id": NEW_A, "reason": "payment_content"}, True),
+    (
+        "an add",
+        {"op": "add", "id": NEW_A, "text": "neutral text", "key": "slot", "src": {"trust": "user"}},
+        True,
+    ),
+    ("an add of an old record", {"op": "add", "id": OLD_A, "text": "neutral text"}, False),
+    ("an update", {"op": "update", "id": NEW_A, "text": "neutral text"}, True),
+    ("a line without a type is an add", {"id": NEW_A, "text": "neutral text"}, True),
+    ("a type the registry does not know", {"op": "invented", "id": NEW_A}, False),
+    ("a type that is not a string", {"op": 7, "id": NEW_A}, False),
+    ("an id that is a number", {"op": "forget", "id": 7}, False),
+    (
+        "a second reference that is a number",
+        {"op": "flag", "a": NEW_A, "b": 7, "why": "negation"},
+        False,
+    ),
+    ("no reference at all", {"op": "flag", "why": "negation"}, False),
+]
+
+
+@pytest.mark.parametrize("what,line,plain", PLAIN_VECTORS, ids=[v[0] for v in PLAIN_VECTORS])
+def test_which_lines_may_be_plain(what, line, plain):
+    event = dict(line, ts=TS, v=2)
+    assert _need(attest, "unguessable")(event) is plain
+
+
+def _add(rid, text):
+    return {"op": "add", "id": rid, "text": text, "key": None}
+
+
+def _chain_of(events, key):
+    lines = [(json.dumps(dict(e, ts=TS, v=2)).encode(), dict(e, ts=TS, v=2)) for e in events]
+    return lines, attest.extend_chain_v2([], lines, key)
+
+
+def test_a_flag_between_two_uuid4_records_verifies_without_a_key():
+    events = [_add(NEW_A, "neutral note one"), _add(NEW_B, "neutral note two")]
+    events.append({"op": "flag", "a": NEW_A, "b": NEW_B, "why": "negation"})
+    lines, chain = _chain_of(events, None)
+    assert all("line_sha256" in e and "keyed" not in e for e in chain)
+    report = attest.verify_chain_v2(chain, lines, None)
+    assert report["ok"] and report["verified"] == 3, report
+
+
+@pytest.mark.parametrize(
+    "flag",
+    [
+        {"op": "flag", "a": OLD_A, "b": NEW_B, "why": "negation"},
+        {"op": "flag", "a": NEW_A, "b": OLD_B, "why": "negation"},
+        {"op": "flag", "a": NEW_A, "b": NEW_B, "why": "the two notes disagree about the gate"},
+    ],
+    ids=["a has 48 bits", "b has 48 bits", "why is text"],
+)
+def test_a_flag_with_a_short_id_or_a_text_why_is_keyed(flag):
+    events = [_add(NEW_A, "neutral note one"), _add(NEW_B, "neutral note two"), flag]
+    with pytest.raises(ValueError):
+        _chain_of(events, None)
+    key = b"k" * 32
+    lines, chain = _chain_of(events, key)
+    assert ["keyed" in e for e in chain] == [False, False, True]
+    assert chain[2]["line_hmac"] == hmac.new(key, lines[2][0], hashlib.sha256).hexdigest()
+    assert attest.verify_chain_v2(chain, lines, None)["error"]["kind"] == "key_missing"
+    assert attest.verify_chain_v2(chain, lines, key)["ok"]
+
+
+def test_the_rule_reads_the_registry_of_the_governance_module():
+    assert attest.unguessable(
+        {"op": "flag", "a": NEW_A, "b": NEW_B, "why": "negation"}, gov.EVENT_FIELDS
+    )
+    without_flag = {k: v for k, v in gov.EVENT_FIELDS.items() if k != "flag"}
+    assert not attest.unguessable(
+        {"op": "flag", "a": NEW_A, "b": NEW_B, "why": "negation"}, without_flag
+    )
+    as_record = dict(
+        gov.EVENT_FIELDS, flag={"record": True, "fields": gov.EVENT_FIELDS["flag"]["fields"]}
+    )
+    assert attest.unguessable({"op": "flag", "a": NEW_A, "b": NEW_B, "why": "free text"}, as_record)
