@@ -71,8 +71,8 @@ the attested lines it removed. Chains written elsewhere with --out are not check
 
 Attest v2 (attest --v2; atelya docs/attest-v2.md): one entry per op-log line holding only a
 digest of the line's exact bytes: a plain SHA-256 when the line names its record by a uuid4
-(122 random bits), else HMAC-SHA256 with <data dir>/.erasure_key (every id atelya writes
-today has 48 bits, so verifying those entries needs that key). Re-running attest --v2
+(122 random bits), else HMAC-SHA256 with <data dir>/.erasure_key (atelya 0.3.4 and earlier
+wrote 48-bit ids, so verifying their records' entries needs that key). Re-running attest --v2
 verifies the chain, then appends entries for the new lines. verify-chain recomputes every
 line from the op-log (--oplog, or the chain path without .attest.jsonl) and names the first
 problem: a modified, reordered, inserted or missing line, a redaction naming a line that

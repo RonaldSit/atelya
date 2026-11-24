@@ -162,8 +162,10 @@ blocks hard purges. `attest --v2` writes a chain of digests instead:
 
 A line gets a plain SHA-256 only when it names its record by a uuid4 (122 random
 bits); any other line could be confirmed by guessing its content, so it is keyed.
-Every id atelya writes today has 48 bits, so today every entry is keyed and verifying
-needs the data directory's `.erasure_key`.
+atelya 0.3.4 and earlier wrote ids of 48 bits, so every entry of their records is keyed
+and verifying needs the data directory's `.erasure_key`. An engine that gives new records
+a uuid4 gets plain entries for the lines that name such a record by `id`; a line that
+names records only in other fields (a contradiction flag) stays keyed.
 
 ```bash
 atelya-govern attest log.jsonl --v2

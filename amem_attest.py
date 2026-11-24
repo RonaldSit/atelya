@@ -185,7 +185,8 @@ def is_v2(chain):
 def unguessable(event):
     """True when the line names its record by a uuid4 in hex (122 random bits): hashing a
     guess of its content cannot confirm it, so its plain sha256 may be shown to anyone.
-    Every id atelya writes today has 48 bits (12 hex), so all its lines are keyed."""
+    atelya 0.3.4 and earlier wrote ids of 48 bits (12 hex digits): every line about such a
+    record is keyed. An engine that gives new records a uuid4 gets plain entries for them."""
     rid = event.get("id") if isinstance(event, dict) else None
     return isinstance(rid, str) and _UUID4_HEX.fullmatch(rid) is not None
 
